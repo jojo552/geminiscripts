@@ -1,5 +1,5 @@
 #!/bin/bash
-# 版本: 3.3.0 - 智能重试 & 功能增强版
+# 版本: 3.3.1 - 完美输出终极版
 
 # 脚本设置：pipefail 依然有用，但移除了 -e，改为手动错误检查
 set -uo pipefail
@@ -39,7 +39,7 @@ setup_environment() {
 }
 
 # ===== 全局配置 =====
-VERSION="3.3.0"
+VERSION="3.3.1"
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
 RANDOM_DELAY_MAX="1.5"
@@ -187,8 +187,6 @@ check_gcp_env() {
     log "SUCCESS" "GCP 环境检查通过。当前活动账户: ${BOLD}${account}${NC}"
 }
 
-# ===== 可重用的核心工作流 =====
-# 为指定项目启用API并创建密钥
 enable_api_and_create_key() {
     local project_id="$1"
     local log_prefix="$2"
@@ -222,9 +220,6 @@ enable_api_and_create_key() {
     return 0
 }
 
-# ===== 主要功能实现 =====
-
-# 功能1：创建新项目并提取密钥
 process_new_project_creation() {
     local project_id="$1"
     local task_num="$2"
@@ -256,7 +251,6 @@ process_new_project_creation() {
     echo "$project_id" >> "${TEMP_DIR}/success.log"
 }
 
-# 功能2：从现有项目提取密钥
 process_existing_project_extraction() {
     local project_id="$1"
     local task_num="$2"
@@ -279,7 +273,6 @@ process_existing_project_extraction() {
     echo "$project_id" >> "${TEMP_DIR}/success.log"
 }
 
-# 编排函数：批量创建
 gemini_batch_create_keys() {
     log "INFO" "====== 高性能批量创建 Gemini API 密钥 ======"
     local num_projects
@@ -330,7 +323,6 @@ gemini_batch_create_keys() {
     report_and_download_results "$comma_key_file" "$pure_key_file"
 }
 
-# 编排函数：从现有项目提取
 gemini_extract_from_existing() {
     log "INFO" "====== 从现有项目提取 Gemini API 密钥 ======"
     log "INFO" "正在获取您账户下的所有活跃项目列表..."
@@ -349,7 +341,7 @@ gemini_extract_from_existing() {
     read -r -p "请输入项目编号 (多个用空格隔开，或输入 'all' 处理全部): " -a selections
     
     local projects_to_process=()
-    if [[ " ${selections[*]} " =~ " all " ]]; then
+    if [[ " ${selections[*],,} " =~ " all " ]]; then # , , converts to lowercase for case-insensitivity
         projects_to_process=("${all_projects[@]}")
     else
         for num in "${selections[@]}"; do
@@ -402,7 +394,6 @@ gemini_extract_from_existing() {
     report_and_download_results "$comma_key_file" "$pure_key_file"
 }
 
-# 编排函数：删除项目
 gemini_batch_delete_projects() {
     log "INFO" "====== 批量删除项目 ======"
     log "INFO" "正在获取您账户下的所有活跃项目列表..."
@@ -471,7 +462,10 @@ gemini_batch_delete_projects() {
     log "INFO" "详细信息已记录到: ${DETAILED_LOG_FILE}"
 }
 
-# 可重用的结果报告和下载函数
+# ====================================================================================
+#  !!!! 最终输出函数 !!!!
+#  重构此函数以提供一个干净、独立的最终结果展示区
+# ====================================================================================
 report_and_download_results() {
     local comma_key_file="$1"
     local pure_key_file="$2"
@@ -481,23 +475,30 @@ report_and_download_results() {
     success_count=$(wc -l < "${TEMP_DIR}/success.log")
     failed_count=$(wc -l < "${TEMP_DIR}/failed.log")
 
-    echo -e "\n${GREEN}${BOLD}====== 操作完成 ======${NC}"
+    echo -e "\n${GREEN}${BOLD}====== 操作完成：统计结果 ======${NC}"
     log "SUCCESS" "成功: ${success_count}"
     log "ERROR" "失败: ${failed_count}"
     
     if [ "$success_count" -gt 0 ]; then
-        log "INFO" "所有密钥已保存至目录: ${BOLD}${OUTPUT_DIR}${NC}"
+        # --- 全新的、干净的最终输出展示区 ---
+        echo -e "\n${PURPLE}======================================================"
+        echo -e "      ✨ 最终API密钥 (可直接复制) ✨"
+        echo -e "======================================================${NC}"
+        echo -e "${GREEN}${BOLD}"
+        cat "$comma_key_file"
+        echo -e "${NC}"
+        echo -e "${PURPLE}======================================================${NC}\n"
+        # --- 展示区结束 ---
+
+        log "INFO" "以上密钥已完整保存至目录: ${BOLD}${OUTPUT_DIR}${NC}"
         
         if [ -n "${DEVSHELL_PROJECT_ID-}" ] && command -v cloudshell &>/dev/null; then
-            log "INFO" "检测到 Cloud Shell 环境，将自动触发下载逗号分隔的密钥文件..."
+            log "INFO" "检测到 Cloud Shell 环境，将自动触发下载..."
             cloudshell download "$comma_key_file"
-            log "SUCCESS" "下载提示已发送。请在浏览器中确认下载文件: ${comma_key_file##*/}"
+            log "SUCCESS" "下载提示已发送。文件: ${comma_key_file##*/}"
         else
-            log "INFO" "纯密钥文件 (每行一个): ${BOLD}${pure_key_file}${NC}"
-            log "INFO" "逗号分隔密钥文件: ${BOLD}${comma_key_file}${NC}"
-            echo -e "\n${CYAN}--- 逗号分隔密钥预览 ---${NC}"
-            cat "$comma_key_file"
-            echo ""
+            log "INFO" "逗号分隔密钥文件路径: ${BOLD}${comma_key_file}${NC}"
+            log "INFO" "单行密钥文件路径: ${BOLD}${pure_key_file}${NC}"
         fi
     fi
     if [ "$failed_count" -gt 0 ]; then
@@ -505,8 +506,6 @@ report_and_download_results() {
     fi
 }
 
-
-# ===== 主菜单与程序入口 =====
 show_main_menu() {
     clear
     echo -e "${PURPLE}${BOLD}"
@@ -537,7 +536,8 @@ main_app() {
     check_gcp_env
     mkdir -p "$OUTPUT_DIR"
     touch "${TEMP_DIR}/log.lock"
-    while true; do
+    while true;
+    do
         show_main_menu
         read -r -p "请选择操作 [0-3]: " choice
         case "$choice" in
@@ -552,6 +552,5 @@ main_app() {
     done
 }
 
-# ===== 脚本执行入口 =====
 setup_environment
 main_app
