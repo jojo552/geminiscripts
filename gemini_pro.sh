@@ -1,15 +1,15 @@
 #!/bin/bash
-# 全自动 Gemini API 密钥管家 - 交互式菜单版
-# 版本: 4.0 (Interactive & Automated)
+# 全自动 Gemini API 密钥管家 - 最终兼容版
+# 版本: 4.2 (Final & Compatible)
 
 # 严格模式
 set -Eeuo pipefail
 
-# ===== 全局配置 (可通过环境变量覆盖) =====
+# ===== 全局配置 =====
 CONCURRENCY="${CONCURRENCY:-40}"
 PROJECT_PREFIX="${PROJECT_PREFIX:-cloud-project}"
 MAX_RETRY="${MAX_RETRY:-3}"
-STATE_FILE="LAST_RUN_PROJECTS.log" # 自动记录上次运行的项目列表
+STATE_FILE="LAST_RUN_PROJECTS.log"
 
 # ===== 颜色定义 =====
 RED='\033[0;31m'
@@ -94,20 +94,21 @@ process_single_project() {
 }
 
 # ===== 交互式功能 =====
-
 main_create() {
     local total_to_create
     read -p "请输入要创建的项目数量: " total_to_create
     if ! [[ "$total_to_create" =~ ^[1-9][0-9]*$ ]]; then
-        log_error "无效的数量。请输入一个正整数。"; sleep 2; return;
+        log_error "无效的数量。请输入一个正整数。"
+        sleep 2
+        return
     fi
     
     echo -e "${YELLOW}即将创建 ${total_to_create} 个项目，并行数: ${CONCURRENCY}。${NC}"
     read -p "确认开始吗? [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[yY](es)?$ ]]; then
         log "操作已取消。"
-    sleep 2
-    return
+        sleep 2
+        return
     fi
 
     log "===== 开始批量创建 Gemini API 密钥 ====="
@@ -122,7 +123,6 @@ main_create() {
 
     local start_time=$SECONDS; local active_jobs=0
 
-    # 先生成所有项目ID，并写入状态文件和临时文件
     rm -f "$STATE_FILE"
     for ((i=0; i<total_to_create; i++)); do
         local project_id="${PROJECT_PREFIX}-$(generate_suffix)"
@@ -137,7 +137,6 @@ main_create() {
             wait -n; ((active_jobs--));
         fi
 
-        # 实时进度
         local success_count=$(cat "$success_counter_file"); local fail_count=$(cat "$fail_counter_file")
         local completed=$((success_count + fail_count)); local elapsed=$((SECONDS - start_time)); local speed=0
         if [[ $elapsed -gt 0 ]] && command -v bc &>/dev/null; then
@@ -208,7 +207,6 @@ execute_delete() {
     log_success "===== 删除操作完成 ====="
     log "详情请查看日志文件: ./${deletion_log}"
 
-    # 询问是否删除状态文件
     if [[ "$file_to_delete" == "$STATE_FILE" ]]; then
         read -p "是否删除已处理的项目列表文件 ${STATE_FILE}? [y/N]: " del_state
         if [[ "$del_state" =~ ^[yY](es)?$ ]]; then
@@ -267,7 +265,7 @@ show_main_menu() {
     clear
     echo -e "${CYAN}"
     echo "╔═══════════════════════════════════════════════════════╗"
-    echo "║          全自动 Gemini API 密钥管家 v4.0              ║"
+    echo "║          全自动 Gemini API 密钥管家 v4.2              ║"
     echo "╚═══════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo "请选择要执行的操作:"
