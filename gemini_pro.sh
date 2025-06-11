@@ -1,15 +1,10 @@
-#gemini专用自动化脚本1.0promax版本
-#请勿倒卖出售
-#完全免费分享
-
-
-
-
-
-
 #!/bin/bash
-set -Euo pipefail
+# 版本: 3.2.1 - 健壮性修复版
 
+# 脚本设置：pipefail 依然有用，但移除了 -e，改为手动错误检查
+set -uo pipefail
+
+# ===== 颜色定义 =====
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -18,6 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 BOLD='\033[1m'
 
+# ===== 环境自检与设置 =====
 setup_environment() {
     echo -e "${CYAN}--- 环境自检与设置 ---${NC}"
     if command -v bc &>/dev/null; then
@@ -42,19 +38,19 @@ setup_environment() {
     sleep 1
 }
 
-VERSION="3.2.0"
+# ===== 全局配置 =====
+VERSION="3.2.1"
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
 RANDOM_DELAY_MAX="1.5"
-
 SESSION_ID=$(date +%Y%m%d_%H%M%S)
 OUTPUT_DIR="gemini_session_${SESSION_ID}"
 DETAILED_LOG_FILE="${OUTPUT_DIR}/detailed_run.log"
 DELETION_LOG_FILE="${OUTPUT_DIR}/project_deletion.log"
-
 TEMP_DIR=$(mktemp -d -t gcp_gemini_XXXXXX)
 SECONDS=0
 
+# ===== 生命周期管理 =====
 cleanup_resources() {
     local exit_code=$?
     log "INFO" "正在执行清理程序..."
@@ -64,6 +60,9 @@ cleanup_resources() {
     fi
     if [ $exit_code -eq 0 ]; then
         log "SUCCESS" "所有操作已成功完成。"
+    # 130 是 Ctrl+C 的退出码
+    elif [ $exit_code -eq 130 ]; then
+        log "WARN" "用户手动中断操作。"
     else
         log "WARN" "脚本因错误退出 (退出码: $exit_code)。"
     fi
@@ -73,15 +72,7 @@ cleanup_resources() {
 }
 trap cleanup_resources EXIT
 
-handle_error() {
-    local exit_code=$?
-    local line_no=$1
-    if [ $exit_code -ne 0 ]; then
-        log "ERROR" "在第 ${line_no} 行发生致命错误 (退出码 ${exit_code})。脚本将终止。"
-    fi
-}
-trap 'handle_error $LINENO' ERR
-
+# ===== 核心工具函数 =====
 log() {
     local level="$1"
     local msg="$2"
@@ -95,30 +86,49 @@ log() {
         "ERROR")   log_line="${RED}[${timestamp}] [ERROR] ${msg}${NC}" ;;
         *)         log_line="[${timestamp}] [${level}] ${msg}" ;;
     esac
-    echo -e "$log_line" | tee -a "$DETAILED_LOG_FILE"
+    # 使用 flock 确保日志写入的原子性，避免并行时日志交叉混杂
+    (
+        flock -x 9
+        echo -e "$log_line" | tee -a "$DETAILED_LOG_FILE"
+    ) 9>"${TEMP_DIR}/log.lock"
 }
 
 require_cmd() {
     if ! command -v "$1" &>/dev/null; then
-        log "ERROR" "核心依赖缺失: '$1'。请在运行脚本前确保它已安装并位于您的 PATH 中。"
+        log "ERROR" "核心依赖缺失: '$1'。请确保它已安装。"
         exit 1
     fi
 }
 
-retry() {
+# 健壮的 gcloud 执行与重试函数
+# 它会同时检查退出码和 stderr 中是否包含明确的 "ERROR"
+robust_gcloud_exec() {
     local n=1
+    local output
+    local exit_code
     while true; do
-        if "$@"; then
+        # 捕获 stdout 和 stderr 到一个变量，并保留退出码
+        output=$( { "$@" 2>&1; } 2>&1 )
+        exit_code=$?
+
+        # 如果退出码为0，且输出中不含 "ERROR:"，则视为成功
+        if [ $exit_code -eq 0 ] && ! echo "$output" | grep -q "ERROR:"; then
+            echo "$output" # 将成功命令的输出返回
             return 0
-        elif [ $n -lt "$MAX_RETRY_ATTEMPTS" ]; then
-            local delay=$((n * 2 + RANDOM % 3))
-            log "WARN" "命令失败: '$*'. 第 ${n}/${MAX_RETRY_ATTEMPTS} 次重试 (等待 ${delay}s)..."
-            sleep "$delay"
-            ((n++))
-        else
+        fi
+        
+        # 如果达到最大重试次数，则失败
+        if [ $n -ge "$MAX_RETRY_ATTEMPTS" ]; then
             log "ERROR" "命令在 ${MAX_RETRY_ATTEMPTS} 次尝试后仍然失败: '$*'"
+            log "ERROR" "最后一次错误输出: $output"
             return 1
         fi
+        
+        local delay=$((n * 2 + RANDOM % 3))
+        log "WARN" "命令 '$*' 出现问题 (退出码: $exit_code)。正在重试 (${n}/${MAX_RETRY_ATTEMPTS})，等待 ${delay}s..."
+        log "WARN" "相关输出: $output"
+        sleep "$delay"
+        ((n++))
     done
 }
 
@@ -175,6 +185,7 @@ check_gcp_env() {
     log "SUCCESS" "GCP 环境检查通过。当前活动账户: ${BOLD}${account}${NC}"
 }
 
+# ===== Gemini 核心功能 =====
 process_single_project() {
     local project_id="$1"
     local task_num="$2"
@@ -185,28 +196,34 @@ process_single_project() {
 
     log "INFO" "${log_prefix} 开始处理..."
     random_sleep
-    if ! retry gcloud projects create "$project_id" --name="$project_id" --quiet >/dev/null 2>&1; then
+
+    # 步骤1: 创建项目
+    if ! robust_gcloud_exec gcloud projects create "$project_id" --name="$project_id" --quiet; then
         log "ERROR" "${log_prefix} 项目创建失败。"
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return 1
     fi
     log "INFO" "${log_prefix} 项目创建成功。"
 
+    # 步骤2: 启用API
     random_sleep
-    if ! retry gcloud services enable generativelanguage.googleapis.com --project="$project_id" --quiet >/dev/null 2>&1; then
+    if ! robust_gcloud_exec gcloud services enable generativelanguage.googleapis.com --project="$project_id" --quiet; then
         log "ERROR" "${log_prefix} 启用 Generative Language API 失败。"
-        gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 || true
+        robust_gcloud_exec gcloud projects delete "$project_id" --quiet || true
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return 1
     fi
     log "INFO" "${log_prefix} API 启用成功。"
 
+    # 步骤3: 创建API密钥
     random_sleep
-    local key_json
     local display_name="gemini-key-$(openssl rand -hex 2)"
-    if ! key_json=$(retry gcloud services api-keys create --project="$project_id" --display-name="$display_name" --format="json(keyString)" --quiet); then
+    local key_json
+    key_json=$(robust_gcloud_exec gcloud services api-keys create --project="$project_id" --display-name="$display_name" --format="json(keyString)" --quiet)
+    
+    if [ $? -ne 0 ]; then
         log "ERROR" "${log_prefix} 创建 API 密钥失败。"
-        gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 || true
+        robust_gcloud_exec gcloud projects delete "$project_id" --quiet || true
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return 1
     fi
@@ -216,7 +233,7 @@ process_single_project() {
 
     if [ -z "$api_key" ]; then
         log "ERROR" "${log_prefix} 无法从API响应中提取密钥。"
-        gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 || true
+        robust_gcloud_exec gcloud projects delete "$project_id" --quiet || true
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return 1
     fi
@@ -266,7 +283,7 @@ gemini_batch_create_keys() {
         process_single_project "$project_id" "$i" "$num_projects" "$pure_key_file" "$comma_key_file" &
         job_count=$((job_count + 1))
         if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then
-            wait -n
+            wait -n || true # 使用 || true 防止 wait 在被信号中断时导致脚本退出
             job_count=$((job_count - 1))
         fi
     done
@@ -304,7 +321,7 @@ gemini_batch_create_keys() {
 
 process_single_deletion() {
     local project_id="$1"
-    if retry gcloud projects delete "$project_id" --quiet >/dev/null 2>&1; then
+    if robust_gcloud_exec gcloud projects delete "$project_id" --quiet; then
         log "SUCCESS" "项目 ${project_id} 已成功删除。"
         echo "$project_id" >> "${TEMP_DIR}/delete_success.log"
     else
@@ -360,7 +377,7 @@ gemini_batch_delete_projects() {
         process_single_deletion "$project_id" &
         job_count=$((job_count + 1))
         if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then
-            wait -n
+            wait -n || true
             job_count=$((job_count - 1))
         fi
     done
@@ -379,6 +396,7 @@ gemini_batch_delete_projects() {
     echo "详细信息已记录到: ${DELETION_LOG_FILE}"
 }
 
+# ===== 主菜单与程序入口 =====
 show_main_menu() {
     clear
     echo -e "${PURPLE}${BOLD}"
@@ -388,7 +406,7 @@ show_main_menu() {
  ||__|||__|||__|||__|||__|||__|||_______|||__|||__|||__||
  |/__\|/__\|/__\|/__\|/__\|/__\|/_______\|/__\|/__\|/__\|
 EOF
-    echo -e " 高性能 Gemini API 密钥批量管理工具  版本1.0promax 此后不再更新"
+    echo -e "      高性能 Gemini API 密钥批量管理工具 ${BOLD}v${VERSION}${NC}"
     echo -e "-----------------------------------------------------"
     echo -e "${YELLOW}  作者: ddddd (脚本完全免费分享，请勿倒卖)${NC}"
     echo -e "-----------------------------------------------------"
@@ -407,6 +425,8 @@ EOF
 main_app() {
     check_gcp_env
     mkdir -p "$OUTPUT_DIR"
+    # 初始化日志锁文件
+    touch "${TEMP_DIR}/log.lock"
     while true; do
         show_main_menu
         read -r -p "请选择操作 [0-2]: " choice
@@ -417,9 +437,10 @@ main_app() {
             *) log "ERROR" "无效输入，请输入 0, 1, 或 2。" ;;
         esac
         echo -e "\n${GREEN}按任意键返回主菜单...${NC}"
-        read -n 1 -s -r
+        read -n 1 -s -r || true
     done
 }
 
+# ===== 脚本执行入口 =====
 setup_environment
 main_app
