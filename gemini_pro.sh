@@ -1,5 +1,5 @@
 #!/bin/bash
-# 版本: 3.4.0 - 终极完美输出版
+# 版本: 3.4.1 - 终极完美输出版 (统一输出格式)
 
 # 脚本设置：pipefail 依然有用，但移除了 -e，改为手动错误检查
 set -uo pipefail
@@ -39,7 +39,7 @@ setup_environment() {
 }
 
 # ===== 全局配置 =====
-VERSION="3.4.0"
+VERSION="3.4.1"
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
 RANDOM_DELAY_MAX="1.5"
@@ -175,8 +175,11 @@ write_key_atomic() {
     local comma_key_file="$3"
     (
         flock -x 200
+        # 写入纯净的 key 文件（每行一个）
         echo "$api_key" >> "$pure_key_file"
+        # 写入逗号分隔的文件
         if [ -s "$comma_key_file" ]; then
+            # 如果文件已有内容，先加一个逗号
             echo -n "," >> "$comma_key_file"
         fi
         echo -n "$api_key" >> "$comma_key_file"
@@ -292,16 +295,13 @@ run_parallel_processor() {
     local processor_func="$1"
     shift
     local projects_to_process=("$@")
-    local pure_key_file
-    local comma_key_file
-
-    if [[ "$processor_func" == "process_new_project_creation" ]]; then
-        pure_key_file="${OUTPUT_DIR}/keys.txt"
-        comma_key_file="${OUTPUT_DIR}/keys_comma_separated.txt"
-    else
-        pure_key_file="${OUTPUT_DIR}/existing_keys.txt"
-        comma_key_file="${OUTPUT_DIR}/existing_keys_comma_separated.txt"
-    fi
+    
+    # ========== 修改点 ==========
+    # 将所有功能的密钥输出统一到相同的文件中，以确保格式和输出的一致性。
+    # 无论运行哪个功能，密钥都会被追加到这两个文件中。
+    local pure_key_file="${OUTPUT_DIR}/all_keys.txt"
+    local comma_key_file="${OUTPUT_DIR}/all_keys_comma_separated.txt"
+    # ==========================
 
     rm -f "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
     touch "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
