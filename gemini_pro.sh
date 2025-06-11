@@ -105,7 +105,9 @@ main_create() {
     echo -e "${YELLOW}即将创建 ${total_to_create} 个项目，并行数: ${CONCURRENCY}。${NC}"
     read -p "确认开始吗? [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[yY](es)?$ ]]; then
-        log "操作已取消。"; sleep 2; return;
+        log "操作已取消。"
+    sleep 2
+    return
     fi
 
     log "===== 开始批量创建 Gemini API 密钥 ====="
