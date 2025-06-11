@@ -2,7 +2,8 @@
 # =================================================================
 #  高性能 Gemini API 密钥批量管理工具
 #  专为速度、稳定性和隐蔽性优化
-#  版本: 3.0.0 (Stealth Edition)
+#  版本: 1.0pro
+#  作者：d
 # =================================================================
 
 # 仅启用 errtrace (-E) 与 nounset (-u)
@@ -20,19 +21,11 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # ===== 全局核心配置 =====
-VERSION="3.0.0"
-LAST_UPDATED="2025-05-24"
-
-# --- 性能与隐蔽性调优参数 ---
-# 最大并行任务数。Cloud Shell 性能有限，建议 20-40。高性能服务器可适当调高。
+VERSION="1.0pro"
+LAST_UPDATED="2025-6-11"
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
-# 最大重试次数，应对API临时性错误
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
-# 随机延迟，模拟人类操作（秒）。会稍微影响极限速度，但能提高隐蔽性。
 RANDOM_DELAY_MAX="1.5" # 最大延迟1.5秒
-
-# ===== 文件与目录 =====
-# 使用时间戳创建唯一的会话目录，用于存放本次运行的所有产出文件
 SESSION_ID=$(date +%Y%m%d_%H%M%S)
 OUTPUT_DIR="gemini_session_${SESSION_ID}"
 mkdir -p "$OUTPUT_DIR"
@@ -40,16 +33,8 @@ PURE_KEY_FILE="${OUTPUT_DIR}/keys.txt"
 COMMA_SEPARATED_KEY_FILE="${OUTPUT_DIR}/keys_comma_separated.txt"
 DETAILED_LOG_FILE="${OUTPUT_DIR}/detailed_run.log"
 DELETION_LOG_FILE="${OUTPUT_DIR}/project_deletion.log"
-
-# ===== 临时资源 =====
-# 创建唯一的临时目录，用于存放并行任务的状态文件
 TEMP_DIR=$(mktemp -d -t gcp_gemini_XXXXXX)
-
-# ===== 脚本生命周期管理 =====
-# 开始计时
 SECONDS=0
-
-# 清理函数：脚本退出时自动执行
 cleanup_resources() {
     local exit_code=$?
     log "INFO" "正在执行清理程序..."
@@ -68,8 +53,6 @@ cleanup_resources() {
     echo -e "${CYAN}感谢使用！${NC}"
 }
 trap cleanup_resources EXIT
-
-# 错误处理函数
 handle_error() {
     local exit_code=$?
     local line_no=$1
@@ -78,10 +61,6 @@ handle_error() {
     fi
 }
 trap 'handle_error $LINENO' ERR
-
-# ===== 核心工具函数 =====
-
-# 日志函数
 log() {
     local level="$1"
     local msg="$2"
@@ -95,19 +74,14 @@ log() {
         "ERROR")   log_line="${RED}[${timestamp}] [ERROR] ${msg}${NC}" ;;
         *)         log_line="[${timestamp}] [${level}] ${msg}" ;;
     esac
-    # 同时输出到控制台和详细日志文件
     echo -e "$log_line" | tee -a "$DETAILED_LOG_FILE"
 }
-
-# 检查依赖命令
 require_cmd() {
     if ! command -v "$1" &>/dev/null; then
         log "ERROR" "核心依赖缺失: '$1'。请确保 gcloud SDK 已正确安装并位于您的 PATH 中。"
         exit 1
     fi
 }
-
-# 改进的重试函数
 retry() {
     local n=1
     while true; do
@@ -124,8 +98,6 @@ retry() {
         fi
     done
 }
-
-# 交互式确认
 ask_yes_no() {
     local prompt="$1"
     local resp
@@ -138,37 +110,28 @@ ask_yes_no() {
         esac
     done
 }
-
-# 生成高度随机的项目ID
 new_project_id() {
     local prefix="$1"
-    # 使用 openssl 生成更强的随机性
     local random_part
     random_part=$(openssl rand -hex 4)
     echo "${prefix}-$(date +%s)-${random_part}" | cut -c1-30
 }
 
-# 原子化地将密钥写入文件 (使用 flock 保证并行安全)
+# 原子写入
 write_key_atomic() {
     local api_key="$1"
     (
         flock -x 200
         echo "$api_key" >> "$PURE_KEY_FILE"
-        # 处理逗号分隔文件
         if [ -s "$COMMA_SEPARATED_KEY_FILE" ]; then
             echo -n "," >> "$COMMA_SEPARATED_KEY_FILE"
         fi
         echo -n "$api_key" >> "$COMMA_SEPARATED_KEY_FILE"
     ) 200>"${TEMP_DIR}/keys.lock"
 }
-
-# 随机延迟函数
 random_sleep() {
-    # 使用 bc 实现浮点数运算，生成 0 到 RANDOM_DELAY_MAX 之间的随机秒数
     sleep "$(bc <<< "scale=2; $RANDOM/32767 * $RANDOM_DELAY_MAX")"
 }
-
-# 检查环境配置
 check_env() {
     log "INFO" "开始环境检查..."
     require_cmd gcloud
@@ -183,11 +146,6 @@ check_env() {
     account=$(gcloud config get-value account)
     log "SUCCESS" "环境检查通过。当前活动账户: ${BOLD}${account}${NC}"
 }
-
-# ===== Gemini 核心功能 =====
-
-# 单个项目的创建、配置、提权全流程 (设计为可在后台并行运行)
-# 参数: 1:项目ID, 2:任务编号, 3:总任务数
 process_single_project() {
     local project_id="$1"
     local task_num="$2"
@@ -418,7 +376,7 @@ show_main_menu() {
  ||__|||__|||__|||__|||__|||__|||_______|||__|||__|||__||
  |/__\|/__\|/__\|/__\|/__\|/__\|/_______\|/__\|/__\|/__\|
 
-     高性能 Gemini API 密钥批量管理工具 v3.0.0
+     高性能 Gemini API 密钥批量管理工具 v1.0pro
 EOF
     echo -e "${NC}"
     local account
@@ -427,7 +385,7 @@ EOF
     echo -e "  当前账户: ${CYAN}${account}${NC}"
     echo -e "  并行任务: ${CYAN}${MAX_PARALLEL_JOBS}${NC}"
     echo -e "-----------------------------------------------------"
-    echo -e "\n${YELLOW}${BOLD}请注意：滥用此脚本可能导致您的GCP账户受限。${NC}\n"
+    echo -e "\n${YELLOW}${BOLD}请注意：滥用此脚本可能导致您的GCP账户受限，脚本完全免费分享请勿倒卖。${NC}\n"
     echo "  1. 批量创建 Gemini API 密钥"
     echo "  2. 批量删除指定前缀的项目"
     echo "  0. 退出脚本"
