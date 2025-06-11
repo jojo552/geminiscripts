@@ -1,5 +1,5 @@
 #!/bin/bash
-# 版本: 3.2.1 - 健壮性修复版
+# 版本: 3.2.2 - 修复密钥提取问题
 
 # 脚本设置：pipefail 依然有用，但移除了 -e，改为手动错误检查
 set -uo pipefail
@@ -39,7 +39,7 @@ setup_environment() {
 }
 
 # ===== 全局配置 =====
-VERSION="3.2.1"
+VERSION="3.2.2"
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
 RANDOM_DELAY_MAX="1.5"
@@ -86,7 +86,6 @@ log() {
         "ERROR")   log_line="${RED}[${timestamp}] [ERROR] ${msg}${NC}" ;;
         *)         log_line="[${timestamp}] [${level}] ${msg}" ;;
     esac
-    # 使用 flock 确保日志写入的原子性，避免并行时日志交叉混杂
     (
         flock -x 9
         echo -e "$log_line" | tee -a "$DETAILED_LOG_FILE"
@@ -100,30 +99,22 @@ require_cmd() {
     fi
 }
 
-# 健壮的 gcloud 执行与重试函数
-# 它会同时检查退出码和 stderr 中是否包含明确的 "ERROR"
 robust_gcloud_exec() {
     local n=1
     local output
     local exit_code
     while true; do
-        # 捕获 stdout 和 stderr 到一个变量，并保留退出码
         output=$( { "$@" 2>&1; } 2>&1 )
         exit_code=$?
-
-        # 如果退出码为0，且输出中不含 "ERROR:"，则视为成功
         if [ $exit_code -eq 0 ] && ! echo "$output" | grep -q "ERROR:"; then
-            echo "$output" # 将成功命令的输出返回
+            echo "$output"
             return 0
         fi
-        
-        # 如果达到最大重试次数，则失败
         if [ $n -ge "$MAX_RETRY_ATTEMPTS" ]; then
             log "ERROR" "命令在 ${MAX_RETRY_ATTEMPTS} 次尝试后仍然失败: '$*'"
             log "ERROR" "最后一次错误输出: $output"
             return 1
         fi
-        
         local delay=$((n * 2 + RANDOM % 3))
         log "WARN" "命令 '$*' 出现问题 (退出码: $exit_code)。正在重试 (${n}/${MAX_RETRY_ATTEMPTS})，等待 ${delay}s..."
         log "WARN" "相关输出: $output"
@@ -175,7 +166,6 @@ check_gcp_env() {
     require_cmd gcloud
     require_cmd openssl
     require_cmd bc
-
     if ! gcloud config get-value account >/dev/null 2>&1; then
         log "ERROR" "GCP 账户未配置。请先运行 'gcloud auth login' 和 'gcloud config set project [YOUR_PROJECT_ID]'."
         exit 1
@@ -197,7 +187,6 @@ process_single_project() {
     log "INFO" "${log_prefix} 开始处理..."
     random_sleep
 
-    # 步骤1: 创建项目
     if ! robust_gcloud_exec gcloud projects create "$project_id" --name="$project_id" --quiet; then
         log "ERROR" "${log_prefix} 项目创建失败。"
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
@@ -205,7 +194,6 @@ process_single_project() {
     fi
     log "INFO" "${log_prefix} 项目创建成功。"
 
-    # 步骤2: 启用API
     random_sleep
     if ! robust_gcloud_exec gcloud services enable generativelanguage.googleapis.com --project="$project_id" --quiet; then
         log "ERROR" "${log_prefix} 启用 Generative Language API 失败。"
@@ -215,11 +203,16 @@ process_single_project() {
     fi
     log "INFO" "${log_prefix} API 启用成功。"
 
-    # 步骤3: 创建API密钥
     random_sleep
     local display_name="gemini-key-$(openssl rand -hex 2)"
     local key_json
-    key_json=$(robust_gcloud_exec gcloud services api-keys create --project="$project_id" --display-name="$display_name" --format="json(keyString)" --quiet)
+    
+    # ====================================================================================
+    #  !!!! 关键修复 !!!!
+    #  使用 --format="json" 代替 --format="json(keyString)"
+    #  这会强制 gcloud 等待操作完成并返回完整的 JSON 对象，而不是异步返回一个操作凭证。
+    # ====================================================================================
+    key_json=$(robust_gcloud_exec gcloud services api-keys create --project="$project_id" --display-name="$display_name" --format="json" --quiet)
     
     if [ $? -ne 0 ]; then
         log "ERROR" "${log_prefix} 创建 API 密钥失败。"
@@ -232,7 +225,7 @@ process_single_project() {
     api_key=$(echo "$key_json" | grep -o '"keyString": "[^"]*' | cut -d'"' -f4)
 
     if [ -z "$api_key" ]; then
-        log "ERROR" "${log_prefix} 无法从API响应中提取密钥。"
+        log "ERROR" "${log_prefix} 无法从API响应中提取密钥。收到的内容: $key_json"
         robust_gcloud_exec gcloud projects delete "$project_id" --quiet || true
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return 1
@@ -283,7 +276,7 @@ gemini_batch_create_keys() {
         process_single_project "$project_id" "$i" "$num_projects" "$pure_key_file" "$comma_key_file" &
         job_count=$((job_count + 1))
         if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then
-            wait -n || true # 使用 || true 防止 wait 在被信号中断时导致脚本退出
+            wait -n || true
             job_count=$((job_count - 1))
         fi
     done
@@ -305,7 +298,7 @@ gemini_batch_create_keys() {
         if [ -n "${DEVSHELL_PROJECT_ID-}" ] && command -v cloudshell &>/dev/null; then
             log "INFO" "检测到 Cloud Shell 环境，将自动触发下载逗号分隔的密钥文件..."
             cloudshell download "$comma_key_file"
-            log "SUCCESS" "下载提示已发送。请在浏览器中确认下载文件: ${comma_key_file}"
+            log "SUCCESS" "下载提示已发送。请在浏览器中确认下载文件: ${comma_key_file##*/}"
         else
             log "INFO" "纯密钥文件 (每行一个): ${BOLD}${pure_key_file}${NC}"
             log "INFO" "逗号分隔密钥文件: ${BOLD}${comma_key_file}${NC}"
@@ -425,7 +418,6 @@ EOF
 main_app() {
     check_gcp_env
     mkdir -p "$OUTPUT_DIR"
-    # 初始化日志锁文件
     touch "${TEMP_DIR}/log.lock"
     while true; do
         show_main_menu
