@@ -1,5 +1,5 @@
 #!/bin/bash
-# 版本: 3.3.1 - 完美输出终极版
+# 版本: 3.4.0 - 终极完美输出版
 
 # 脚本设置：pipefail 依然有用，但移除了 -e，改为手动错误检查
 set -uo pipefail
@@ -15,31 +15,31 @@ BOLD='\033[1m'
 
 # ===== 环境自检与设置 =====
 setup_environment() {
-    echo -e "${CYAN}--- 环境自检与设置 ---${NC}"
+    echo -e "${CYAN}--- 环境自检与设置 ---${NC}" >&2
     if command -v bc &>/dev/null; then
-        echo -e "${GREEN}[✓] 核心依赖 'bc' 已安装。${NC}"
+        echo -e "${GREEN}[✓] 核心依赖 'bc' 已安装。${NC}" >&2
     else
-        echo -e "${YELLOW}[!] 核心依赖 'bc' 未找到，正在尝试自动安装...${NC}"
-        echo "    (这可能需要您输入 sudo 密码)"
+        echo -e "${YELLOW}[!] 核心依赖 'bc' 未找到，正在尝试自动安装...${NC}" >&2
+        echo "    (这可能需要您输入 sudo 密码)" >&2
         if command -v apt-get &>/dev/null; then
             if sudo apt-get update >/dev/null && sudo apt-get install -y bc >/dev/null; then
-                echo -e "${GREEN}[✓] 依赖 'bc' 安装成功！${NC}"
+                echo -e "${GREEN}[✓] 依赖 'bc' 安装成功！${NC}" >&2
             else
-                echo -e "${RED}[✗] 自动安装 'bc' 失败。${NC}"
-                echo -e "${YELLOW}请尝试手动运行: 'sudo apt-get update && sudo apt-get install -y bc'${NC}"
+                echo -e "${RED}[✗] 自动安装 'bc' 失败。${NC}" >&2
+                echo -e "${YELLOW}请尝试手动运行: 'sudo apt-get update && sudo apt-get install -y bc'${NC}" >&2
                 exit 1
             fi
         else
-            echo -e "${RED}[✗] 无法找到 apt-get 包管理器。请手动安装 'bc'。${NC}"
+            echo -e "${RED}[✗] 无法找到 apt-get 包管理器。请手动安装 'bc'。${NC}" >&2
             exit 1
         fi
     fi
-    echo -e "${CYAN}--- 环境检查完毕 ---\n${NC}"
+    echo -e "${CYAN}--- 环境检查完毕 ---\n${NC}" >&2
     sleep 1
 }
 
 # ===== 全局配置 =====
-VERSION="3.3.1"
+VERSION="3.4.0"
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
 RANDOM_DELAY_MAX="1.5"
@@ -53,6 +53,8 @@ SECONDS=0
 # ===== 生命周期管理 =====
 cleanup_resources() {
     local exit_code=$?
+    # 在清理前确保所有后台任务都已结束
+    wait
     log "INFO" "正在执行清理程序..."
     if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
         rm -rf "$TEMP_DIR"
@@ -66,18 +68,24 @@ cleanup_resources() {
         log "WARN" "脚本因错误退出 (退出码: $exit_code)。"
     fi
     duration=$SECONDS
-    echo -e "\n${PURPLE}本次运行总耗时: ${BOLD}$((duration / 60)) 分 $((duration % 60)) 秒${NC}"
-    echo -e "${CYAN}感谢使用！${NC}"
+    echo -e "\n${PURPLE}本次运行总耗时: ${BOLD}$((duration / 60)) 分 $((duration % 60)) 秒${NC}" >&2
+    echo -e "${CYAN}感谢使用！${NC}" >&2
 }
 trap cleanup_resources EXIT
 
-# ===== 核心工具函数 =====
+# ====================================================================================
+#  !!!! 核心修复：重构 log 函数 !!!!
+#  所有屏幕输出都重定向到 stderr (>&2)，确保不污染 stdout。
+#  这样，`var=$(function)` 就只能捕获到函数中用 `echo` 返回的纯净数据。
+# ====================================================================================
 log() {
     local level="$1"
     local msg="$2"
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     local log_line
+    local clean_log_line
+    
     case "$level" in
         "INFO")    log_line="${CYAN}[${timestamp}] [INFO] ${msg}${NC}" ;;
         "SUCCESS") log_line="${GREEN}[${timestamp}] [SUCCESS] ${msg}${NC}" ;;
@@ -85,9 +93,16 @@ log() {
         "ERROR")   log_line="${RED}[${timestamp}] [ERROR] ${msg}${NC}" ;;
         *)         log_line="[${timestamp}] [${level}] ${msg}" ;;
     esac
+    
+    clean_log_line="[${timestamp}] [${level}] ${msg}"
+    
+    # 将带颜色的日志打印到屏幕（标准错误流）
+    echo -e "$log_line" >&2
+    
+    # 将不带颜色的干净日志写入文件
     (
         flock -x 9
-        echo -e "$log_line" | tee -a "$DETAILED_LOG_FILE"
+        echo "$clean_log_line" >> "$DETAILED_LOG_FILE"
     ) 9>"${TEMP_DIR}/log.lock"
 }
 
@@ -116,14 +131,13 @@ smart_retry_gcloud() {
         for pattern in "${fatal_patterns[@]}"; do
             if [[ "$output" == *"$pattern"* ]]; then
                 log "ERROR" "检测到致命且不可重试的错误: '$pattern'"
-                log "ERROR" "相关命令: '$*'"
-                log "ERROR" "完整输出: $output"
                 return 1
             fi
         done
         
         if [ $n -ge "$MAX_RETRY_ATTEMPTS" ]; then
-            log "ERROR" "命令在 ${MAX_RETRY_ATTEMPTS} 次尝试后仍然失败: '$*'"
+            log "ERROR" "命令在 ${MAX_RETRY_ATTEMPTS} 次尝试后仍然失败。"
+            log "ERROR" "相关命令: '$*'"
             log "ERROR" "最后一次错误输出: $output"
             return 1
         fi
@@ -143,7 +157,7 @@ ask_yes_no() {
         case "$resp" in
             [Yy]* ) return 0;;
             [Nn]* ) return 1;;
-            * ) echo "请输入 y 或 n.";;
+            * ) echo "请输入 y 或 n." >&2;;
         esac
     done
 }
@@ -203,7 +217,7 @@ enable_api_and_create_key() {
     local key_json
     key_json=$(smart_retry_gcloud gcloud services api-keys create --project="$project_id" --display-name="$display_name" --format="json" --quiet)
     
-    if [ $? -ne 0 ]; then
+    if [ -z "$key_json" ]; then
         log "ERROR" "${log_prefix} 创建 API 密钥失败。"
         return 1
     fi
@@ -234,16 +248,16 @@ process_new_project_creation() {
     if ! smart_retry_gcloud gcloud projects create "$project_id" --name="$project_id" --quiet; then
         log "ERROR" "${log_prefix} 项目创建失败。"
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
-        return 1
+        return
     fi
     log "INFO" "${log_prefix} 项目创建成功。"
 
     local api_key
     api_key=$(enable_api_and_create_key "$project_id" "$log_prefix")
-    if [ $? -ne 0 ]; then
-        smart_retry_gcloud gcloud projects delete "$project_id" --quiet || true
+    if [ -z "$api_key" ]; then
+        smart_retry_gcloud gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 || true
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
-        return 1
+        return
     fi
     
     write_key_atomic "$api_key" "$pure_key_file" "$comma_key_file"
@@ -263,9 +277,9 @@ process_existing_project_extraction() {
     
     local api_key
     api_key=$(enable_api_and_create_key "$project_id" "$log_prefix")
-    if [ $? -ne 0 ]; then
+    if [ -z "$api_key" ]; then
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
-        return 1
+        return
     fi
     
     write_key_atomic "$api_key" "$pure_key_file" "$comma_key_file"
@@ -273,43 +287,30 @@ process_existing_project_extraction() {
     echo "$project_id" >> "${TEMP_DIR}/success.log"
 }
 
-gemini_batch_create_keys() {
-    log "INFO" "====== 高性能批量创建 Gemini API 密钥 ======"
-    local num_projects
-    read -r -p "请输入要创建的项目数量 (例如: 50): " num_projects
-    if ! [[ "$num_projects" =~ ^[1-9][0-9]*$ ]]; then
-        log "ERROR" "无效的数字。请输入一个大于0的整数。"
-        return 1
-    fi
-    local project_prefix
-    read -r -p "请输入项目前缀 (默认: gemini-pro): " project_prefix
-    project_prefix=${project_prefix:-gemini-pro}
+# ===== 编排函数 =====
+run_parallel_processor() {
+    local processor_func="$1"
+    shift
+    local projects_to_process=("$@")
+    local pure_key_file
+    local comma_key_file
 
-    mkdir -p "$OUTPUT_DIR"
-    local pure_key_file="${OUTPUT_DIR}/keys.txt"
-    local comma_key_file="${OUTPUT_DIR}/keys_comma_separated.txt"
-
-    echo -e "\n${YELLOW}${BOLD}=== 操作确认 ===${NC}"
-    echo -e "  计划创建项目数: ${BOLD}${num_projects}${NC}"
-    echo -e "  项目前缀:       ${BOLD}${project_prefix}${NC}"
-    echo -e "  并行任务数:     ${BOLD}${MAX_PARALLEL_JOBS}${NC}"
-    echo -e "  输出目录:       ${BOLD}${OUTPUT_DIR}${NC}"
-    echo -e "${RED}警告: 大规模创建项目可能违反GCP服务条款或超出配额。${NC}"
-    if ! ask_yes_no "确认要继续吗?"; then
-        log "INFO" "操作已取消。"
-        return 1
+    if [[ "$processor_func" == "process_new_project_creation" ]]; then
+        pure_key_file="${OUTPUT_DIR}/keys.txt"
+        comma_key_file="${OUTPUT_DIR}/keys_comma_separated.txt"
+    else
+        pure_key_file="${OUTPUT_DIR}/existing_keys.txt"
+        comma_key_file="${OUTPUT_DIR}/existing_keys_comma_separated.txt"
     fi
-    
+
     rm -f "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
     touch "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
 
-    log "INFO" "开始批量创建任务，请稍候..."
-    
     local job_count=0
-    for i in $(seq 1 "$num_projects"); do
-        local project_id
-        project_id=$(new_project_id "$project_prefix")
-        process_new_project_creation "$project_id" "$i" "$num_projects" "$pure_key_file" "$comma_key_file" &
+    local total_tasks=${#projects_to_process[@]}
+    for i in "${!projects_to_process[@]}"; do
+        local project_id="${projects_to_process[i]}"
+        "$processor_func" "$project_id" "$((i+1))" "$total_tasks" "$pure_key_file" "$comma_key_file" &
         job_count=$((job_count + 1))
         if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then
             wait -n || true
@@ -319,8 +320,41 @@ gemini_batch_create_keys() {
 
     log "INFO" "所有任务已派发，正在等待剩余任务完成..."
     wait
-    
+
     report_and_download_results "$comma_key_file" "$pure_key_file"
+}
+
+gemini_batch_create_keys() {
+    log "INFO" "====== 高性能批量创建 Gemini API 密钥 ======"
+    local num_projects
+    read -r -p "请输入要创建的项目数量 (例如: 50): " num_projects
+    if ! [[ "$num_projects" =~ ^[1-9][0-9]*$ ]]; then
+        log "ERROR" "无效的数字。请输入一个大于0的整数。"
+        return
+    fi
+    local project_prefix
+    read -r -p "请输入项目前缀 (默认: gemini-pro): " project_prefix
+    project_prefix=${project_prefix:-gemini-pro}
+    
+    mkdir -p "$OUTPUT_DIR"
+    
+    echo -e "\n${YELLOW}${BOLD}=== 操作确认 ===${NC}" >&2
+    echo -e "  计划创建项目数: ${BOLD}${num_projects}${NC}" >&2
+    echo -e "  项目前缀:       ${BOLD}${project_prefix}${NC}" >&2
+    echo -e "  并行任务数:     ${BOLD}${MAX_PARALLEL_JOBS}${NC}" >&2
+    echo -e "  输出目录:       ${BOLD}${OUTPUT_DIR}${NC}" >&2
+    echo -e "${RED}警告: 大规模创建项目可能违反GCP服务条款或超出配额。${NC}" >&2
+    if ! ask_yes_no "确认要继续吗?"; then
+        log "INFO" "操作已取消。"
+        return
+    fi
+
+    local projects_to_create=()
+    for ((i=1; i<=num_projects; i++)); do
+        projects_to_create+=("$(new_project_id "$project_prefix")")
+    done
+    
+    run_parallel_processor "process_new_project_creation" "${projects_to_create[@]}"
 }
 
 gemini_extract_from_existing() {
@@ -330,18 +364,18 @@ gemini_extract_from_existing() {
 
     if [ ${#all_projects[@]} -eq 0 ]; then
         log "ERROR" "未找到任何活跃项目。"
-        return 1
+        return
     fi
     
     log "INFO" "找到 ${#all_projects[@]} 个活跃项目。请选择要处理的项目:"
     for i in "${!all_projects[@]}"; do
-        printf "  %3d. %s\n" "$((i+1))" "${all_projects[i]}"
+        printf "  %3d. %s\n" "$((i+1))" "${all_projects[i]}" >&2
     done
 
     read -r -p "请输入项目编号 (多个用空格隔开，或输入 'all' 处理全部): " -a selections
     
     local projects_to_process=()
-    if [[ " ${selections[*],,} " =~ " all " ]]; then # , , converts to lowercase for case-insensitivity
+    if [[ " ${selections[*],,} " =~ " all " ]]; then
         projects_to_process=("${all_projects[@]}")
     else
         for num in "${selections[@]}"; do
@@ -355,57 +389,32 @@ gemini_extract_from_existing() {
 
     if [ ${#projects_to_process[@]} -eq 0 ]; then
         log "ERROR" "未选择任何有效项目。"
-        return 1
+        return
     fi
 
     mkdir -p "$OUTPUT_DIR"
-    local pure_key_file="${OUTPUT_DIR}/existing_keys.txt"
-    local comma_key_file="${OUTPUT_DIR}/existing_keys_comma_separated.txt"
 
-    echo -e "\n${YELLOW}${BOLD}=== 操作确认 ===${NC}"
-    echo -e "  将为 ${#projects_to_process[@]} 个现有项目提取新密钥。"
-    echo -e "  并行任务数:     ${BOLD}${MAX_PARALLEL_JOBS}${NC}"
-    echo -e "  输出目录:       ${BOLD}${OUTPUT_DIR}${NC}"
+    echo -e "\n${YELLOW}${BOLD}=== 操作确认 ===${NC}" >&2
+    echo -e "  将为 ${#projects_to_process[@]} 个现有项目提取新密钥。" >&2
+    echo -e "  并行任务数:     ${BOLD}${MAX_PARALLEL_JOBS}${NC}" >&2
+    echo -e "  输出目录:       ${BOLD}${OUTPUT_DIR}${NC}" >&2
     if ! ask_yes_no "确认要继续吗?"; then
         log "INFO" "操作已取消。"
-        return 1
+        return
     fi
     
-    rm -f "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
-    touch "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
-
-    log "INFO" "开始批量处理现有项目..."
-
-    local job_count=0
-    local total_tasks=${#projects_to_process[@]}
-    for i in "${!projects_to_process[@]}"; do
-        local project_id="${projects_to_process[i]}"
-        process_existing_project_extraction "$project_id" "$((i+1))" "$total_tasks" "$pure_key_file" "$comma_key_file" &
-        job_count=$((job_count + 1))
-        if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then
-            wait -n || true
-            job_count=$((job_count - 1))
-        fi
-    done
-
-    log "INFO" "所有任务已派发，正在等待剩余任务完成..."
-    wait
-
-    report_and_download_results "$comma_key_file" "$pure_key_file"
+    run_parallel_processor "process_existing_project_extraction" "${projects_to_process[@]}"
 }
 
 gemini_batch_delete_projects() {
     log "INFO" "====== 批量删除项目 ======"
-    log "INFO" "正在获取您账户下的所有活跃项目列表..."
     mapfile -t projects < <(gcloud projects list --filter='lifecycleState:ACTIVE' --format='value(projectId)' 2>/dev/null)
-
     if [ ${#projects[@]} -eq 0 ]; then
         log "ERROR" "未找到任何活跃项目。"
-        return 1
+        return
     fi
     
-    log "INFO" "找到 ${#projects[@]} 个活跃项目。"
-    read -r -p "请输入要删除的项目前缀 (例如: 'gemini-pro'，留空则匹配所有): " prefix
+    read -r -p "请输入要删除的项目前缀 (留空则匹配所有): " prefix
 
     local projects_to_delete=()
     for proj in "${projects[@]}"; do
@@ -416,20 +425,20 @@ gemini_batch_delete_projects() {
 
     if [ ${#projects_to_delete[@]} -eq 0 ]; then
         log "WARN" "没有找到任何项目匹配前缀: '${prefix}'"
-        return 1
+        return
     fi
 
-    echo -e "\n${YELLOW}将要删除以下 ${#projects_to_delete[@]} 个项目:${NC}"
-    printf ' - %s\n' "${projects_to_delete[@]}" | head -n 20
+    echo -e "\n${YELLOW}将要删除以下 ${#projects_to_delete[@]} 个项目:${NC}" >&2
+    printf ' - %s\n' "${projects_to_delete[@]}" | head -n 20 >&2
     if [ ${#projects_to_delete[@]} -gt 20 ]; then
-        echo "   ... 等等"
+        echo "   ... 等等" >&2
     fi
 
-    echo -e "\n${RED}${BOLD}!!! 警告：此操作不可逆，将永久删除项目及其所有资源 !!!${NC}"
+    echo -e "\n${RED}${BOLD}!!! 警告：此操作不可逆 !!!${NC}" >&2
     read -r -p "请输入 'DELETE' 来确认删除: " confirmation
     if [ "$confirmation" != "DELETE" ]; then
         log "INFO" "删除操作已取消。"
-        return 1
+        return
     fi
 
     rm -f "${TEMP_DIR}/delete_success.log" "${TEMP_DIR}/delete_failed.log"
@@ -438,9 +447,13 @@ gemini_batch_delete_projects() {
     
     local job_count=0
     for project_id in "${projects_to_delete[@]}"; do
-        smart_retry_gcloud gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 && \
-            echo "$project_id" >> "${TEMP_DIR}/delete_success.log" || \
-            echo "$project_id" >> "${TEMP_DIR}/delete_failed.log" &
+        {
+            if smart_retry_gcloud gcloud projects delete "$project_id" --quiet; then
+                echo "$project_id" >> "${TEMP_DIR}/delete_success.log"
+            else
+                echo "$project_id" >> "${TEMP_DIR}/delete_failed.log"
+            fi
+        } &
         job_count=$((job_count + 1))
         if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then
             wait -n || true
@@ -448,47 +461,36 @@ gemini_batch_delete_projects() {
         fi
     done
     
-    log "INFO" "正在等待所有删除任务完成..."
     wait
+    local success_count=$(wc -l < "${TEMP_DIR}/delete_success.log")
+    local failed_count=$(wc -l < "${TEMP_DIR}/delete_failed.log")
 
-    local success_count
-    local failed_count
-    success_count=$(wc -l < "${TEMP_DIR}/delete_success.log")
-    failed_count=$(wc -l < "${TEMP_DIR}/delete_failed.log")
-
-    echo -e "\n${GREEN}${BOLD}====== 批量删除完成 ======${NC}"
+    echo -e "\n${GREEN}${BOLD}====== 批量删除完成 ======${NC}" >&2
     log "SUCCESS" "成功删除: ${success_count}"
     log "ERROR" "删除失败: ${failed_count}"
-    log "INFO" "详细信息已记录到: ${DETAILED_LOG_FILE}"
 }
 
-# ====================================================================================
-#  !!!! 最终输出函数 !!!!
-#  重构此函数以提供一个干净、独立的最终结果展示区
-# ====================================================================================
 report_and_download_results() {
     local comma_key_file="$1"
     local pure_key_file="$2"
-    
     local success_count
     local failed_count
     success_count=$(wc -l < "${TEMP_DIR}/success.log")
     failed_count=$(wc -l < "${TEMP_DIR}/failed.log")
 
-    echo -e "\n${GREEN}${BOLD}====== 操作完成：统计结果 ======${NC}"
+    echo -e "\n${GREEN}${BOLD}====== 操作完成：统计结果 ======${NC}" >&2
     log "SUCCESS" "成功: ${success_count}"
     log "ERROR" "失败: ${failed_count}"
     
     if [ "$success_count" -gt 0 ]; then
-        # --- 全新的、干净的最终输出展示区 ---
-        echo -e "\n${PURPLE}======================================================"
-        echo -e "      ✨ 最终API密钥 (可直接复制) ✨"
-        echo -e "======================================================${NC}"
-        echo -e "${GREEN}${BOLD}"
-        cat "$comma_key_file"
-        echo -e "${NC}"
-        echo -e "${PURPLE}======================================================${NC}\n"
-        # --- 展示区结束 ---
+        echo -e "\n${PURPLE}======================================================" >&2
+        echo -e "      ✨ 最终API密钥 (可直接复制) ✨" >&2
+        echo -e "======================================================${NC}" >&2
+        echo -e "${GREEN}${BOLD}" >&2
+        cat "$comma_key_file" >&2
+        echo >&2
+        echo -e "${NC}" >&2
+        echo -e "${PURPLE}======================================================${NC}\n" >&2
 
         log "INFO" "以上密钥已完整保存至目录: ${BOLD}${OUTPUT_DIR}${NC}"
         
@@ -498,7 +500,6 @@ report_and_download_results() {
             log "SUCCESS" "下载提示已发送。文件: ${comma_key_file##*/}"
         else
             log "INFO" "逗号分隔密钥文件路径: ${BOLD}${comma_key_file}${NC}"
-            log "INFO" "单行密钥文件路径: ${BOLD}${pure_key_file}${NC}"
         fi
     fi
     if [ "$failed_count" -gt 0 ]; then
@@ -508,28 +509,28 @@ report_and_download_results() {
 
 show_main_menu() {
     clear
-    echo -e "${PURPLE}${BOLD}"
-    cat << "EOF"
+    echo -e "${PURPLE}${BOLD}" >&2
+    cat >&2 << "EOF"
   ____ ____ ____ ____ ____ ____ _________ ____ ____ ____ 
  ||G |||e |||m |||i |||n |||i |||       |||K |||e |||y ||
  ||__|||__|||__|||__|||__|||__|||_______|||__|||__|||__||
  |/__\|/__\|/__\|/__\|/__\|/__\|/_______\|/__\|/__\|/__\|
 EOF
-    echo -e "      高性能 Gemini API 密钥批量管理工具 ${BOLD}v${VERSION}${NC}"
-    echo -e "-----------------------------------------------------"
-    echo -e "${YELLOW}  作者: ddddd (脚本完全免费分享，请勿倒卖)${NC}"
-    echo -e "-----------------------------------------------------"
+    echo -e "      高性能 Gemini API 密钥批量管理工具 ${BOLD}v${VERSION}${NC}" >&2
+    echo -e "-----------------------------------------------------" >&2
+    echo -e "${YELLOW}  作者: ddddd (脚本完全免费分享，请勿倒卖)${NC}" >&2
+    echo -e "-----------------------------------------------------" >&2
     local account
     account=$(gcloud config get-value account 2>/dev/null || echo "未登录")
-    echo -e "  当前账户: ${CYAN}${account}${NC}"
-    echo -e "  并行任务: ${CYAN}${MAX_PARALLEL_JOBS}${NC}"
-    echo -e "-----------------------------------------------------"
-    echo -e "\n${RED}${BOLD}请注意：滥用此脚本可能导致您的GCP账户受限。${NC}\n"
-    echo "  1. 批量创建新项目并提取密钥"
-    echo "  2. 从现有项目中提取 API 密钥"
-    echo "  3. 批量删除指定前缀的项目"
-    echo "  0. 退出脚本"
-    echo ""
+    echo -e "  当前账户: ${CYAN}${account}${NC}" >&2
+    echo -e "  并行任务: ${CYAN}${MAX_PARALLEL_JOBS}${NC}" >&2
+    echo -e "-----------------------------------------------------" >&2
+    echo -e "\n${RED}${BOLD}请注意：滥用此脚本可能导致您的GCP账户受限。${NC}\n" >&2
+    echo "  1. 批量创建新项目并提取密钥" >&2
+    echo "  2. 从现有项目中提取 API 密钥" >&2
+    echo "  3. 批量删除指定前缀的项目" >&2
+    echo "  0. 退出脚本" >&2
+    echo "" >&2
 }
 
 main_app() {
@@ -547,7 +548,7 @@ main_app() {
             0) exit 0 ;;
             *) log "ERROR" "无效输入，请输入 0, 1, 2, 或 3。" ;;
         esac
-        echo -e "\n${GREEN}按任意键返回主菜单...${NC}"
+        echo -e "\n${GREEN}按任意键返回主菜单...${NC}" >&2
         read -n 1 -s -r || true
     done
 }
