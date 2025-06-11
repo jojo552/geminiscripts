@@ -1,44 +1,54 @@
 #!/bin/bash
-# =================================================================
-#  高性能 Gemini API 密钥批量管理工具
-#  专为速度、稳定性和隐蔽性优化
-#  版本: 1.0pro
-#  作者：d
-# =================================================================
-
-# 仅启用 errtrace (-E) 与 nounset (-u)
-# pipefail: 如果管道中任何一个命令失败，则整个管道失败
 set -Euo pipefail
 
-# ===== 颜色定义 =====
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 BOLD='\033[1m'
 
-# ===== 全局核心配置 =====
-VERSION="1.0pro"
-LAST_UPDATED="2025-6-11"
+setup_environment() {
+    echo -e "${CYAN}--- 环境自检与设置 ---${NC}"
+    if command -v bc &>/dev/null; then
+        echo -e "${GREEN}[✓] 核心依赖 'bc' 已安装。${NC}"
+    else
+        echo -e "${YELLOW}[!] 核心依赖 'bc' 未找到，正在尝试自动安装...${NC}"
+        echo "    (这可能需要您输入 sudo 密码)"
+        if command -v apt-get &>/dev/null; then
+            if sudo apt-get update >/dev/null && sudo apt-get install -y bc >/dev/null; then
+                echo -e "${GREEN}[✓] 依赖 'bc' 安装成功！${NC}"
+            else
+                echo -e "${RED}[✗] 自动安装 'bc' 失败。${NC}"
+                echo -e "${YELLOW}请尝试手动运行: 'sudo apt-get update && sudo apt-get install -y bc'${NC}"
+                exit 1
+            fi
+        else
+            echo -e "${RED}[✗] 无法找到 apt-get 包管理器。请手动安装 'bc'。${NC}"
+            exit 1
+        fi
+    fi
+    echo -e "${CYAN}--- 环境检查完毕 ---\n${NC}"
+    sleep 1
+}
+
+VERSION="3.2.0"
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
-RANDOM_DELAY_MAX="1.5" # 最大延迟1.5秒
+RANDOM_DELAY_MAX="1.5"
+
 SESSION_ID=$(date +%Y%m%d_%H%M%S)
 OUTPUT_DIR="gemini_session_${SESSION_ID}"
-mkdir -p "$OUTPUT_DIR"
-PURE_KEY_FILE="${OUTPUT_DIR}/keys.txt"
-COMMA_SEPARATED_KEY_FILE="${OUTPUT_DIR}/keys_comma_separated.txt"
 DETAILED_LOG_FILE="${OUTPUT_DIR}/detailed_run.log"
 DELETION_LOG_FILE="${OUTPUT_DIR}/project_deletion.log"
+
 TEMP_DIR=$(mktemp -d -t gcp_gemini_XXXXXX)
 SECONDS=0
+
 cleanup_resources() {
     local exit_code=$?
     log "INFO" "正在执行清理程序..."
-    # 清理临时文件
     if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
         rm -rf "$TEMP_DIR"
         log "INFO" "已清理临时文件目录: $TEMP_DIR"
@@ -53,6 +63,7 @@ cleanup_resources() {
     echo -e "${CYAN}感谢使用！${NC}"
 }
 trap cleanup_resources EXIT
+
 handle_error() {
     local exit_code=$?
     local line_no=$1
@@ -61,6 +72,7 @@ handle_error() {
     fi
 }
 trap 'handle_error $LINENO' ERR
+
 log() {
     local level="$1"
     local msg="$2"
@@ -76,12 +88,14 @@ log() {
     esac
     echo -e "$log_line" | tee -a "$DETAILED_LOG_FILE"
 }
+
 require_cmd() {
     if ! command -v "$1" &>/dev/null; then
-        log "ERROR" "核心依赖缺失: '$1'。请确保 gcloud SDK 已正确安装并位于您的 PATH 中。"
+        log "ERROR" "核心依赖缺失: '$1'。请在运行脚本前确保它已安装并位于您的 PATH 中。"
         exit 1
     fi
 }
+
 retry() {
     local n=1
     while true; do
@@ -98,6 +112,7 @@ retry() {
         fi
     done
 }
+
 ask_yes_no() {
     local prompt="$1"
     local resp
@@ -110,6 +125,7 @@ ask_yes_no() {
         esac
     done
 }
+
 new_project_id() {
     local prefix="$1"
     local random_part
@@ -117,23 +133,26 @@ new_project_id() {
     echo "${prefix}-$(date +%s)-${random_part}" | cut -c1-30
 }
 
-# 原子写入
 write_key_atomic() {
     local api_key="$1"
+    local pure_key_file="$2"
+    local comma_key_file="$3"
     (
         flock -x 200
-        echo "$api_key" >> "$PURE_KEY_FILE"
-        if [ -s "$COMMA_SEPARATED_KEY_FILE" ]; then
-            echo -n "," >> "$COMMA_SEPARATED_KEY_FILE"
+        echo "$api_key" >> "$pure_key_file"
+        if [ -s "$comma_key_file" ]; then
+            echo -n "," >> "$comma_key_file"
         fi
-        echo -n "$api_key" >> "$COMMA_SEPARATED_KEY_FILE"
+        echo -n "$api_key" >> "$comma_key_file"
     ) 200>"${TEMP_DIR}/keys.lock"
 }
+
 random_sleep() {
     sleep "$(bc <<< "scale=2; $RANDOM/32767 * $RANDOM_DELAY_MAX")"
 }
-check_env() {
-    log "INFO" "开始环境检查..."
+
+check_gcp_env() {
+    log "INFO" "检查 GCP 环境配置..."
     require_cmd gcloud
     require_cmd openssl
     require_cmd bc
@@ -144,17 +163,18 @@ check_env() {
     fi
     local account
     account=$(gcloud config get-value account)
-    log "SUCCESS" "环境检查通过。当前活动账户: ${BOLD}${account}${NC}"
+    log "SUCCESS" "GCP 环境检查通过。当前活动账户: ${BOLD}${account}${NC}"
 }
+
 process_single_project() {
     local project_id="$1"
     local task_num="$2"
     local total_tasks="$3"
+    local pure_key_file="$4"
+    local comma_key_file="$5"
     local log_prefix="[${task_num}/${total_tasks}] [${project_id}]"
 
     log "INFO" "${log_prefix} 开始处理..."
-
-    # 1. 创建项目
     random_sleep
     if ! retry gcloud projects create "$project_id" --name="$project_id" --quiet >/dev/null 2>&1; then
         log "ERROR" "${log_prefix} 项目创建失败。"
@@ -163,33 +183,25 @@ process_single_project() {
     fi
     log "INFO" "${log_prefix} 项目创建成功。"
 
-    # 2. 启用 Generative Language API
     random_sleep
     if ! retry gcloud services enable generativelanguage.googleapis.com --project="$project_id" --quiet >/dev/null 2>&1; then
         log "ERROR" "${log_prefix} 启用 Generative Language API 失败。"
-        # 失败后尝试清理项目，避免留下垃圾资源
         gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 || true
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return 1
     fi
     log "INFO" "${log_prefix} API 启用成功。"
 
-    # 3. 创建 API 密钥
     random_sleep
     local key_json
-    # 增加显示名称的随机性
     local display_name="gemini-key-$(openssl rand -hex 2)"
-    if ! key_json=$(retry gcloud services api-keys create \
-                        --project="$project_id" \
-                        --display-name="$display_name" \
-                        --format="json(keyString)" --quiet); then
+    if ! key_json=$(retry gcloud services api-keys create --project="$project_id" --display-name="$display_name" --format="json(keyString)" --quiet); then
         log "ERROR" "${log_prefix} 创建 API 密钥失败。"
         gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 || true
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return 1
     fi
 
-    # 4. 提取密钥并写入文件
     local api_key
     api_key=$(echo "$key_json" | grep -o '"keyString": "[^"]*' | cut -d'"' -f4)
 
@@ -200,26 +212,27 @@ process_single_project() {
         return 1
     fi
 
-    write_key_atomic "$api_key"
+    write_key_atomic "$api_key" "$pure_key_file" "$comma_key_file"
     log "SUCCESS" "${log_prefix} 成功获取密钥并已保存！"
     echo "$project_id" >> "${TEMP_DIR}/success.log"
     return 0
 }
 
-# 批量创建主函数
 gemini_batch_create_keys() {
     log "INFO" "====== 高性能批量创建 Gemini API 密钥 ======"
-    
     local num_projects
     read -r -p "请输入要创建的项目数量 (例如: 50): " num_projects
     if ! [[ "$num_projects" =~ ^[1-9][0-9]*$ ]]; then
         log "ERROR" "无效的数字。请输入一个大于0的整数。"
         return 1
     fi
-
     local project_prefix
     read -r -p "请输入项目前缀 (默认: gemini-pro): " project_prefix
     project_prefix=${project_prefix:-gemini-pro}
+
+    mkdir -p "$OUTPUT_DIR"
+    local pure_key_file="${OUTPUT_DIR}/keys.txt"
+    local comma_key_file="${OUTPUT_DIR}/keys_comma_separated.txt"
 
     echo -e "\n${YELLOW}${BOLD}=== 操作确认 ===${NC}"
     echo -e "  计划创建项目数: ${BOLD}${num_projects}${NC}"
@@ -232,7 +245,6 @@ gemini_batch_create_keys() {
         return 1
     fi
     
-    # 清理旧的状态文件
     rm -f "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
     touch "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
 
@@ -242,22 +254,17 @@ gemini_batch_create_keys() {
     for i in $(seq 1 "$num_projects"); do
         local project_id
         project_id=$(new_project_id "$project_prefix")
-        # 在后台启动任务单元
-        process_single_project "$project_id" "$i" "$num_projects" &
-
-        # 控制并行任务数量
+        process_single_project "$project_id" "$i" "$num_projects" "$pure_key_file" "$comma_key_file" &
         job_count=$((job_count + 1))
         if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then
-            wait -n # 等待任何一个后台任务完成
+            wait -n
             job_count=$((job_count - 1))
         fi
     done
 
-    # 等待所有剩余的后台任务完成
     log "INFO" "所有任务已派发，正在等待剩余任务完成..."
     wait
     
-    # 统计结果
     local success_count
     local failed_count
     success_count=$(wc -l < "${TEMP_DIR}/success.log")
@@ -268,19 +275,24 @@ gemini_batch_create_keys() {
     log "ERROR" "失败: ${failed_count}"
     if [ "$success_count" -gt 0 ]; then
         log "INFO" "所有密钥已保存至目录: ${BOLD}${OUTPUT_DIR}${NC}"
-        log "INFO" "纯密钥文件: ${BOLD}${PURE_KEY_FILE}${NC}"
-        log "INFO" "逗号分隔文件: ${BOLD}${COMMA_SEPARATED_KEY_FILE}${NC}"
         
-        echo -e "\n${CYAN}--- 前5个密钥预览 ---${NC}"
-        head -n 5 "$PURE_KEY_FILE"
-        echo "..."
+        if [ -n "${DEVSHELL_PROJECT_ID-}" ] && command -v cloudshell &>/dev/null; then
+            log "INFO" "检测到 Cloud Shell 环境，将自动触发下载逗号分隔的密钥文件..."
+            cloudshell download "$comma_key_file"
+            log "SUCCESS" "下载提示已发送。请在浏览器中确认下载文件: ${comma_key_file}"
+        else
+            log "INFO" "纯密钥文件 (每行一个): ${BOLD}${pure_key_file}${NC}"
+            log "INFO" "逗号分隔密钥文件: ${BOLD}${comma_key_file}${NC}"
+            echo -e "\n${CYAN}--- 逗号分隔密钥预览 ---${NC}"
+            cat "$comma_key_file"
+            echo ""
+        fi
     fi
     if [ "$failed_count" -gt 0 ]; then
         log "WARN" "失败的项目ID列表保存在详细日志中: ${DETAILED_LOG_FILE}"
     fi
 }
 
-# 单个项目的删除流程
 process_single_deletion() {
     local project_id="$1"
     if retry gcloud projects delete "$project_id" --quiet >/dev/null 2>&1; then
@@ -292,12 +304,9 @@ process_single_deletion() {
     fi
 }
 
-# 批量删除主函数
 gemini_batch_delete_projects() {
     log "INFO" "====== 批量删除项目 ======"
     log "INFO" "正在获取您账户下的所有活跃项目列表..."
-    
-    # 获取项目列表并存入数组
     mapfile -t projects < <(gcloud projects list --filter='lifecycleState:ACTIVE' --format='value(projectId)' 2>/dev/null)
 
     if [ ${#projects[@]} -eq 0 ]; then
@@ -333,10 +342,8 @@ gemini_batch_delete_projects() {
         return 1
     fi
 
-    # 清理旧的状态文件
     rm -f "${TEMP_DIR}/delete_success.log" "${TEMP_DIR}/delete_failed.log"
     touch "${TEMP_DIR}/delete_success.log" "${TEMP_DIR}/delete_failed.log"
-
     log "INFO" "开始批量删除任务..."
     
     local job_count=0
@@ -363,37 +370,34 @@ gemini_batch_delete_projects() {
     echo "详细信息已记录到: ${DELETION_LOG_FILE}"
 }
 
-
-# ===== 主菜单与程序入口 =====
-
 show_main_menu() {
     clear
     echo -e "${PURPLE}${BOLD}"
     cat << "EOF"
-    
   ____ ____ ____ ____ ____ ____ _________ ____ ____ ____ 
  ||G |||e |||m |||i |||n |||i |||       |||K |||e |||y ||
  ||__|||__|||__|||__|||__|||__|||_______|||__|||__|||__||
  |/__\|/__\|/__\|/__\|/__\|/__\|/_______\|/__\|/__\|/__\|
-
-     高性能 Gemini API 密钥批量管理工具 v1.0pro
 EOF
-    echo -e "${NC}"
+    echo -e "      高性能 Gemini API 密钥批量管理工具 ${BOLD}v${VERSION}${NC}"
+    echo -e "-----------------------------------------------------"
+    echo -e "${YELLOW}  作者: ddddd (脚本完全免费分享，请勿倒卖)${NC}"
+    echo -e "-----------------------------------------------------"
     local account
     account=$(gcloud config get-value account 2>/dev/null || echo "未登录")
-    echo -e "-----------------------------------------------------"
     echo -e "  当前账户: ${CYAN}${account}${NC}"
     echo -e "  并行任务: ${CYAN}${MAX_PARALLEL_JOBS}${NC}"
     echo -e "-----------------------------------------------------"
-    echo -e "\n${YELLOW}${BOLD}请注意：滥用此脚本可能导致您的GCP账户受限，脚本完全免费分享请勿倒卖。${NC}\n"
+    echo -e "\n${RED}${BOLD}请注意：滥用此脚本可能导致您的GCP账户受限。${NC}\n"
     echo "  1. 批量创建 Gemini API 密钥"
     echo "  2. 批量删除指定前缀的项目"
     echo "  0. 退出脚本"
     echo ""
 }
 
-main() {
-    check_env
+main_app() {
+    check_gcp_env
+    mkdir -p "$OUTPUT_DIR"
     while true; do
         show_main_menu
         read -r -p "请选择操作 [0-2]: " choice
@@ -408,5 +412,5 @@ main() {
     done
 }
 
-# 运行主程序
-main
+setup_environment
+main_app
