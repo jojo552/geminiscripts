@@ -1,5 +1,5 @@
 #!/bin/bash
-# 版本: 3.5.0 - 稳定与健壮性增强版 (统一输出格式)
+# 版本: 3.5.1 - 修复语法错误 (统一输出格式)
 
 # 脚本设置：pipefail 依然有用，但移除了 -e，改为手动错误检查
 set -uo pipefail
@@ -46,7 +46,7 @@ setup_environment() {
 
 
 # ===== 全局配置 =====
-VERSION="3.5.0" # Updated Version
+VERSION="3.5.1" # Updated Version
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
 RANDOM_DELAY_MAX="1.5"
@@ -101,10 +101,13 @@ log() {
     clean_log_line="[${timestamp}] [${level}] ${msg}"
     
     echo -e "$log_line" >&2
-    (
-        flock -x 9
-        echo "$clean_log_line" >> "$DETAILED_LOG_FILE"
-    ) 9>"${TEMP_DIR}/log.lock"
+    # Ensure directory and lock file exist before trying to log.
+    if [ -d "$OUTPUT_DIR" ] && [ -f "${TEMP_DIR}/log.lock" ]; then
+        (
+            flock -x 9
+            echo "$clean_log_line" >> "$DETAILED_LOG_FILE"
+        ) 9>"${TEMP_DIR}/log.lock"
+    fi
 }
 
 require_cmd() {
@@ -120,9 +123,9 @@ smart_retry_gcloud() {
     local exit_code
     # ===== MODIFICATION START: 增加更多不可重试的错误模式 =====
     local fatal_patterns=(
-        "exceeded your allotted project quota" 
-        "PERMISSION_DENIED" 
-        "Billing account not configured" 
+        "exceeded your allotted project quota"
+        "PERMISSION_DENIED"
+        "Billing account not configured"
         "already exists"
         "The project ID you specified is already in use by another project"
         "Caller does not have permission"
@@ -301,7 +304,8 @@ process_existing_project_extraction() {
     
     local api_key
     api_key=$(enable_api_and_create_key "$project_id" "$log_prefix")
-    if [ -z "$api_key" ]; a
+    # <<< FIX: The 'a' has been replaced with 'then' to correct the syntax.
+    if [ -z "$api_key" ]; then
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return
     fi
@@ -317,9 +321,6 @@ run_parallel_processor() {
     shift
     local projects_to_process=("$@")
     
-    # EVIDNECE: This section confirms your unified output design.
-    # Regardless of the function, the output is directed to the same set of files in the session directory.
-    # This is excellent design and already meets your requirement.
     local pure_key_file="${OUTPUT_DIR}/all_keys.txt"
     local comma_key_file="${OUTPUT_DIR}/all_keys_comma_separated.txt"
 
@@ -558,7 +559,6 @@ EOF
 main_app() {
     mkdir -p "$OUTPUT_DIR"
     touch "${TEMP_DIR}/log.lock"
-    # ===== MODIFICATION: 移到这里，这样日志文件就绪了 =====
     check_gcp_env
 
     while true;
