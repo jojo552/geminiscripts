@@ -1,5 +1,5 @@
 #!/bin/bash
-# 版本: 3.4.1 - 终极完美输出版 (统一输出格式)
+# 版本: 3.5.0 - 稳定与健壮性增强版 (统一输出格式)
 
 # 脚本设置：pipefail 依然有用，但移除了 -e，改为手动错误检查
 set -uo pipefail
@@ -16,17 +16,16 @@ BOLD='\033[1m'
 # ===== 环境自检与设置 =====
 setup_environment() {
     echo -e "${CYAN}--- 环境自检与设置 ---${NC}" >&2
-    if command -v bc &>/dev/null; then
-        echo -e "${GREEN}[✓] 核心依赖 'bc' 已安装。${NC}" >&2
-    else
+    # ===== MODIFICATION START: 优化依赖检查 =====
+    # 检查 'bc' 并尝试安装
+    if ! command -v bc &>/dev/null; then
         echo -e "${YELLOW}[!] 核心依赖 'bc' 未找到，正在尝试自动安装...${NC}" >&2
         echo "    (这可能需要您输入 sudo 密码)" >&2
         if command -v apt-get &>/dev/null; then
             if sudo apt-get update >/dev/null && sudo apt-get install -y bc >/dev/null; then
                 echo -e "${GREEN}[✓] 依赖 'bc' 安装成功！${NC}" >&2
             else
-                echo -e "${RED}[✗] 自动安装 'bc' 失败。${NC}" >&2
-                echo -e "${YELLOW}请尝试手动运行: 'sudo apt-get update && sudo apt-get install -y bc'${NC}" >&2
+                echo -e "${RED}[✗] 自动安装 'bc' 失败。请手动安装 'bc'。${NC}" >&2
                 exit 1
             fi
         else
@@ -34,12 +33,20 @@ setup_environment() {
             exit 1
         fi
     fi
+
+    # 检查 'jq' 并提示安装
+    if ! command -v jq &>/dev/null; then
+        echo -e "${YELLOW}[!] 推荐依赖 'jq' 未找到。脚本将使用备用方法解析数据，但这可能不稳定。${NC}" >&2
+        echo -e "${YELLOW}    建议安装 'jq' 以提高稳定性 (例如: 'sudo apt-get install jq')${NC}" >&2
+    fi
+    # ===== MODIFICATION END =====
     echo -e "${CYAN}--- 环境检查完毕 ---\n${NC}" >&2
     sleep 1
 }
 
+
 # ===== 全局配置 =====
-VERSION="3.4.1"
+VERSION="3.5.0" # Updated Version
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
 RANDOM_DELAY_MAX="1.5"
@@ -53,7 +60,6 @@ SECONDS=0
 # ===== 生命周期管理 =====
 cleanup_resources() {
     local exit_code=$?
-    # 在清理前确保所有后台任务都已结束
     wait
     log "INFO" "正在执行清理程序..."
     if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
@@ -74,9 +80,7 @@ cleanup_resources() {
 trap cleanup_resources EXIT
 
 # ====================================================================================
-#  !!!! 核心修复：重构 log 函数 !!!!
 #  所有屏幕输出都重定向到 stderr (>&2)，确保不污染 stdout。
-#  这样，`var=$(function)` 就只能捕获到函数中用 `echo` 返回的纯净数据。
 # ====================================================================================
 log() {
     local level="$1"
@@ -96,10 +100,7 @@ log() {
     
     clean_log_line="[${timestamp}] [${level}] ${msg}"
     
-    # 将带颜色的日志打印到屏幕（标准错误流）
     echo -e "$log_line" >&2
-    
-    # 将不带颜色的干净日志写入文件
     (
         flock -x 9
         echo "$clean_log_line" >> "$DETAILED_LOG_FILE"
@@ -108,7 +109,7 @@ log() {
 
 require_cmd() {
     if ! command -v "$1" &>/dev/null; then
-        log "ERROR" "核心依赖缺失: '$1'。请确保它已安装。"
+        log "ERROR" "核心依赖缺失: '$1'。请确保它已安装并位于您的 PATH 中。"
         exit 1
     fi
 }
@@ -117,7 +118,16 @@ smart_retry_gcloud() {
     local n=1
     local output
     local exit_code
-    local fatal_patterns=("exceeded your allotted project quota" "PERMISSION_DENIED" "Billing account not configured" "already exists")
+    # ===== MODIFICATION START: 增加更多不可重试的错误模式 =====
+    local fatal_patterns=(
+        "exceeded your allotted project quota" 
+        "PERMISSION_DENIED" 
+        "Billing account not configured" 
+        "already exists"
+        "The project ID you specified is already in use by another project"
+        "Caller does not have permission"
+    )
+    # ===== MODIFICATION END =====
 
     while true; do
         output=$( { "$@" 2>&1; } 2>&1 )
@@ -131,6 +141,10 @@ smart_retry_gcloud() {
         for pattern in "${fatal_patterns[@]}"; do
             if [[ "$output" == *"$pattern"* ]]; then
                 log "ERROR" "检测到致命且不可重试的错误: '$pattern'"
+                # ===== MODIFICATION START: 将详细错误输出到日志文件 =====
+                log "ERROR" "相关命令: '$*'"
+                log "ERROR" "详细输出: $output"
+                # ===== MODIFICATION END =====
                 return 1
             fi
         done
@@ -175,11 +189,8 @@ write_key_atomic() {
     local comma_key_file="$3"
     (
         flock -x 200
-        # 写入纯净的 key 文件（每行一个）
         echo "$api_key" >> "$pure_key_file"
-        # 写入逗号分隔的文件
         if [ -s "$comma_key_file" ]; then
-            # 如果文件已有内容，先加一个逗号
             echo -n "," >> "$comma_key_file"
         fi
         echo -n "$api_key" >> "$comma_key_file"
@@ -192,9 +203,11 @@ random_sleep() {
 
 check_gcp_env() {
     log "INFO" "检查 GCP 环境配置..."
+    # ===== MODIFICATION START: 强化依赖检查 =====
     require_cmd gcloud
     require_cmd openssl
     require_cmd bc
+    # ===== MODIFICATION END =====
     if ! gcloud config get-value account >/dev/null 2>&1; then
         log "ERROR" "GCP 账户未配置。请先运行 'gcloud auth login' 和 'gcloud config set project [YOUR_PROJECT_ID]'."
         exit 1
@@ -226,9 +239,16 @@ enable_api_and_create_key() {
     fi
 
     local api_key
-    api_key=$(echo "$key_json" | grep -o '"keyString": "[^"]*' | cut -d'"' -f4)
+    # ===== MODIFICATION START: 使用 jq 优先解析，增强稳定性 =====
+    if command -v jq &>/dev/null; then
+        api_key=$(echo "$key_json" | jq -r '.response.keyString')
+    else
+        # Fallback to original method if jq is not available
+        api_key=$(echo "$key_json" | grep -o '"keyString": "[^"]*' | cut -d'"' -f4)
+    fi
+    # ===== MODIFICATION END =====
 
-    if [ -z "$api_key" ]; then
+    if [ -z "$api_key" ] || [ "$api_key" == "null" ]; then
         log "ERROR" "${log_prefix} 无法从API响应中提取密钥。收到的内容: $key_json"
         return 1
     fi
@@ -258,6 +278,7 @@ process_new_project_creation() {
     local api_key
     api_key=$(enable_api_and_create_key "$project_id" "$log_prefix")
     if [ -z "$api_key" ]; then
+        log "WARN" "${log_prefix} 获取密钥失败，将尝试删除此空项目以进行清理。"
         smart_retry_gcloud gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 || true
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return
@@ -280,7 +301,7 @@ process_existing_project_extraction() {
     
     local api_key
     api_key=$(enable_api_and_create_key "$project_id" "$log_prefix")
-    if [ -z "$api_key" ]; then
+    if [ -z "$api_key" ]; a
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return
     fi
@@ -296,12 +317,11 @@ run_parallel_processor() {
     shift
     local projects_to_process=("$@")
     
-    # ========== 修改点 ==========
-    # 将所有功能的密钥输出统一到相同的文件中，以确保格式和输出的一致性。
-    # 无论运行哪个功能，密钥都会被追加到这两个文件中。
+    # EVIDNECE: This section confirms your unified output design.
+    # Regardless of the function, the output is directed to the same set of files in the session directory.
+    # This is excellent design and already meets your requirement.
     local pure_key_file="${OUTPUT_DIR}/all_keys.txt"
     local comma_key_file="${OUTPUT_DIR}/all_keys_comma_separated.txt"
-    # ==========================
 
     rm -f "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
     touch "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
@@ -449,8 +469,10 @@ gemini_batch_delete_projects() {
     for project_id in "${projects_to_delete[@]}"; do
         {
             if smart_retry_gcloud gcloud projects delete "$project_id" --quiet; then
+                log "SUCCESS" "项目 [${project_id}] 删除成功。"
                 echo "$project_id" >> "${TEMP_DIR}/delete_success.log"
             else
+                log "ERROR" "项目 [${project_id}] 删除失败。"
                 echo "$project_id" >> "${TEMP_DIR}/delete_failed.log"
             fi
         } &
@@ -462,8 +484,8 @@ gemini_batch_delete_projects() {
     done
     
     wait
-    local success_count=$(wc -l < "${TEMP_DIR}/delete_success.log")
-    local failed_count=$(wc -l < "${TEMP_DIR}/delete_failed.log")
+    local success_count=$(wc -l < "${TEMP_DIR}/delete_success.log" | tr -d ' ')
+    local failed_count=$(wc -l < "${TEMP_DIR}/delete_failed.log" | tr -d ' ')
 
     echo -e "\n${GREEN}${BOLD}====== 批量删除完成 ======${NC}" >&2
     log "SUCCESS" "成功删除: ${success_count}"
@@ -475,8 +497,8 @@ report_and_download_results() {
     local pure_key_file="$2"
     local success_count
     local failed_count
-    success_count=$(wc -l < "${TEMP_DIR}/success.log")
-    failed_count=$(wc -l < "${TEMP_DIR}/failed.log")
+    success_count=$(wc -l < "${TEMP_DIR}/success.log" | tr -d ' ')
+    failed_count=$(wc -l < "${TEMP_DIR}/failed.log" | tr -d ' ')
 
     echo -e "\n${GREEN}${BOLD}====== 操作完成：统计结果 ======${NC}" >&2
     log "SUCCESS" "成功: ${success_count}"
@@ -493,13 +515,13 @@ report_and_download_results() {
         echo -e "${PURPLE}======================================================${NC}\n" >&2
 
         log "INFO" "以上密钥已完整保存至目录: ${BOLD}${OUTPUT_DIR}${NC}"
+        log "INFO" "逗号分隔密钥文件: ${BOLD}${comma_key_file}${NC}"
+        log "INFO" "每行一个密钥文件: ${BOLD}${pure_key_file}${NC}"
         
         if [ -n "${DEVSHELL_PROJECT_ID-}" ] && command -v cloudshell &>/dev/null; then
             log "INFO" "检测到 Cloud Shell 环境，将自动触发下载..."
             cloudshell download "$comma_key_file"
             log "SUCCESS" "下载提示已发送。文件: ${comma_key_file##*/}"
-        else
-            log "INFO" "逗号分隔密钥文件路径: ${BOLD}${comma_key_file}${NC}"
         fi
     fi
     if [ "$failed_count" -gt 0 ]; then
@@ -534,9 +556,11 @@ EOF
 }
 
 main_app() {
-    check_gcp_env
     mkdir -p "$OUTPUT_DIR"
     touch "${TEMP_DIR}/log.lock"
+    # ===== MODIFICATION: 移到这里，这样日志文件就绪了 =====
+    check_gcp_env
+
     while true;
     do
         show_main_menu
@@ -553,5 +577,6 @@ main_app() {
     done
 }
 
+# ===== Main Execution =====
 setup_environment
 main_app
