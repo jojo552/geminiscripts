@@ -1,5 +1,5 @@
 #!/bin/bash
-# 版本: 3.5.1 - 修复语法错误 (统一输出格式)
+# 版本: 3.5.2 - 修复 gcloud 输出解析错误
 
 # 脚本设置：pipefail 依然有用，但移除了 -e，改为手动错误检查
 set -uo pipefail
@@ -46,7 +46,7 @@ setup_environment() {
 
 
 # ===== 全局配置 =====
-VERSION="3.5.1" # Updated Version
+VERSION="3.5.2" # Updated Version
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
 RANDOM_DELAY_MAX="1.5"
@@ -242,14 +242,16 @@ enable_api_and_create_key() {
     fi
 
     local api_key
-    # ===== MODIFICATION START: 使用 jq 优先解析，增强稳定性 =====
+    # ===== FIX START: Clean gcloud output before parsing =====
+    # The gcloud command outputs progress text and multiple JSON objects.
+    # The 'sed' command isolates the final, complete JSON object before parsing.
     if command -v jq &>/dev/null; then
-        api_key=$(echo "$key_json" | jq -r '.response.keyString')
+        api_key=$(echo "$key_json" | sed -n '/^{/,$p' | jq -r '.response.keyString')
     else
-        # Fallback to original method if jq is not available
-        api_key=$(echo "$key_json" | grep -o '"keyString": "[^"]*' | cut -d'"' -f4)
+        # The same sed command is needed for the fallback method.
+        api_key=$(echo "$key_json" | sed -n '/^{/,$p' | grep -o '"keyString": "[^"]*' | cut -d'"' -f4 | tail -n 1)
     fi
-    # ===== MODIFICATION END =====
+    # ===== FIX END =====
 
     if [ -z "$api_key" ] || [ "$api_key" == "null" ]; then
         log "ERROR" "${log_prefix} 无法从API响应中提取密钥。收到的内容: $key_json"
@@ -304,7 +306,6 @@ process_existing_project_extraction() {
     
     local api_key
     api_key=$(enable_api_and_create_key "$project_id" "$log_prefix")
-    # <<< FIX: The 'a' has been replaced with 'then' to correct the syntax.
     if [ -z "$api_key" ]; then
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return
