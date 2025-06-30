@@ -1,5 +1,7 @@
 #!/bin/bash
-# 版本: 3.5.2 - 修复 gcloud 输出解析错误
+# 版本: 3.5.4 - 修复新项目创建时 API Key 格式污染问题
+# 修复说明: 将 enable_api_and_create_key 函数内 gcloud services enable 的输出重定向到 stderr，
+#           防止其成功消息污染最终返回的 API Key 字符串。
 
 # 脚本设置：pipefail 依然有用，但移除了 -e，改为手动错误检查
 set -uo pipefail
@@ -46,7 +48,7 @@ setup_environment() {
 
 
 # ===== 全局配置 =====
-VERSION="3.5.2" # Updated Version
+VERSION="3.5.4" # Updated Version
 MAX_PARALLEL_JOBS="${CONCURRENCY:-25}"
 MAX_RETRY_ATTEMPTS="${MAX_RETRY:-3}"
 RANDOM_DELAY_MAX="1.5"
@@ -121,7 +123,6 @@ smart_retry_gcloud() {
     local n=1
     local output
     local exit_code
-    # ===== MODIFICATION START: 增加更多不可重试的错误模式 =====
     local fatal_patterns=(
         "exceeded your allotted project quota"
         "PERMISSION_DENIED"
@@ -130,28 +131,29 @@ smart_retry_gcloud() {
         "The project ID you specified is already in use by another project"
         "Caller does not have permission"
     )
-    # ===== MODIFICATION END =====
 
     while true; do
+        # Capture both stdout and stderr to check for errors
         output=$( { "$@" 2>&1; } 2>&1 )
         exit_code=$?
 
+        # Success condition: exit code is 0 and no "ERROR:" string in output
         if [ $exit_code -eq 0 ] && ! echo "$output" | grep -q "ERROR:"; then
-            echo "$output"
+            echo "$output" # Print the success output
             return 0
         fi
 
+        # Check for fatal, non-retriable errors
         for pattern in "${fatal_patterns[@]}"; do
             if [[ "$output" == *"$pattern"* ]]; then
                 log "ERROR" "检测到致命且不可重试的错误: '$pattern'"
-                # ===== MODIFICATION START: 将详细错误输出到日志文件 =====
                 log "ERROR" "相关命令: '$*'"
                 log "ERROR" "详细输出: $output"
-                # ===== MODIFICATION END =====
                 return 1
             fi
         done
         
+        # Retry condition
         if [ $n -ge "$MAX_RETRY_ATTEMPTS" ]; then
             log "ERROR" "命令在 ${MAX_RETRY_ATTEMPTS} 次尝试后仍然失败。"
             log "ERROR" "相关命令: '$*'"
@@ -206,11 +208,9 @@ random_sleep() {
 
 check_gcp_env() {
     log "INFO" "检查 GCP 环境配置..."
-    # ===== MODIFICATION START: 强化依赖检查 =====
     require_cmd gcloud
     require_cmd openssl
     require_cmd bc
-    # ===== MODIFICATION END =====
     if ! gcloud config get-value account >/dev/null 2>&1; then
         log "ERROR" "GCP 账户未配置。请先运行 'gcloud auth login' 和 'gcloud config set project [YOUR_PROJECT_ID]'."
         exit 1
@@ -225,10 +225,17 @@ enable_api_and_create_key() {
     local log_prefix="$2"
     
     random_sleep
-    if ! smart_retry_gcloud gcloud services enable generativelanguage.googleapis.com --project="$project_id" --quiet; then
+    # ===== FIX START: 重定向 API 启用命令的输出 =====
+    # `smart_retry_gcloud` 在成功时会打印命令的输出。对于 `gcloud services enable`，
+    # 这会产生 "Operation ... finished successfully." 之类的消息。
+    # 如果不重定向，这个消息会被 `api_key=$(...)` 命令替换捕获，从而污染 API Key。
+    # 通过 `>&2` 将其标准输出重定向到标准错误，可以确保只有最终的 `echo "$api_key"`
+    # 被捕获，同时保留了在屏幕上看到成功消息的能力。
+    if ! smart_retry_gcloud gcloud services enable generativelanguage.googleapis.com --project="$project_id" --quiet >&2; then
         log "ERROR" "${log_prefix} 启用 Generative Language API 失败。"
         return 1
     fi
+    # ===== FIX END =====
     log "INFO" "${log_prefix} API 启用成功。"
 
     random_sleep
@@ -242,22 +249,18 @@ enable_api_and_create_key() {
     fi
 
     local api_key
-    # ===== FIX START: Clean gcloud output before parsing =====
-    # The gcloud command outputs progress text and multiple JSON objects.
-    # The 'sed' command isolates the final, complete JSON object before parsing.
     if command -v jq &>/dev/null; then
         api_key=$(echo "$key_json" | sed -n '/^{/,$p' | jq -r '.response.keyString')
     else
-        # The same sed command is needed for the fallback method.
         api_key=$(echo "$key_json" | sed -n '/^{/,$p' | grep -o '"keyString": "[^"]*' | cut -d'"' -f4 | tail -n 1)
     fi
-    # ===== FIX END =====
 
     if [ -z "$api_key" ] || [ "$api_key" == "null" ]; then
         log "ERROR" "${log_prefix} 无法从API响应中提取密钥。收到的内容: $key_json"
         return 1
     fi
     
+    # 此函数的唯一标准输出，确保调用者只获得纯净的 key
     echo "$api_key"
     return 0
 }
@@ -273,7 +276,8 @@ process_new_project_creation() {
     log "INFO" "${log_prefix} 开始创建..."
     random_sleep
 
-    if ! smart_retry_gcloud gcloud projects create "$project_id" --name="$project_id" --quiet; then
+    # 将创建项目的输出重定向到 stderr，以防万一它也产生不必要的 stdout
+    if ! smart_retry_gcloud gcloud projects create "$project_id" --name="$project_id" --quiet >&2; then
         log "ERROR" "${log_prefix} 项目创建失败。"
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
         return
@@ -324,6 +328,10 @@ run_parallel_processor() {
     
     local pure_key_file="${OUTPUT_DIR}/all_keys.txt"
     local comma_key_file="${OUTPUT_DIR}/all_keys_comma_separated.txt"
+
+    # 初始化输出文件，确保每次运行都是干净的
+    > "$pure_key_file"
+    > "$comma_key_file"
 
     rm -f "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
     touch "${TEMP_DIR}/success.log" "${TEMP_DIR}/failed.log"
