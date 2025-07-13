@@ -1,19 +1,22 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
-# High-Performance Gemini API Key Batch Management Tool v2.4 (Final Setup Fix)
+# High-Performance Gemini API Key Batch Management Tool v3.0 (No-Alpha Edition)
 # Author: ddddd (https://github.com/dddddd1)
 #
-# Changelog v2.4:
-# - Replaced the 'grep' check in the setup function with a more robust,
-#   built-in bash string comparison ('[[ "$var" == *substring* ]]').
-# - This definitively fixes the bug where apt-managed environments were
-#   correctly detected but improperly handled, leading to incorrect error messages.
+# Changelog v3.0:
+# - COMPLETE REMOVAL of all 'gcloud alpha' dependencies.
+# - The setup function no longer checks for or installs any alpha components.
+# - Replaced the complex 3-stage async workflow with a simpler, more robust
+#   parallel processing model. Each project is created and processed in a
+#   single, linear background job.
+# - Replaced 'gcloud alpha services api-keys create' with the stable GA command
+#   'gcloud services api-keys create'.
 #
 # WARNING: Aggressive use of this script may lead to GCP account restrictions.
 # ------------------------------------------------------------------------------
 
 # ===== Global Configuration =====
-VERSION="2.4-Final-Setup-Fix"
+VERSION="3.0-No-Alpha"
 : "${MAX_PARALLEL_JOBS:=30}"
 TEMP_DIR=$(mktemp -d)
 OUTPUT_DIR="${PWD}/gemini_keys_$(date +%Y%m%d_%H%M%S)"
@@ -59,7 +62,7 @@ ask_yes_no() {
 
 # ===== Core Utility and Setup Functions =====
 
-# [REBUILT v2.4] Final setup function with robust bash-native error checking
+# [REBUILT v3.0] Simplified setup without any alpha component checks.
 setup_environment() {
     mkdir -p "$OUTPUT_DIR"
     log "INFO" "临时目录: ${TEMP_DIR}"
@@ -69,54 +72,6 @@ setup_environment() {
     if ! command -v gcloud &> /dev/null; then
         log "ERROR" "gcloud 命令未找到。请安装 Google Cloud SDK。"
         exit 1
-    fi
-
-    log "INFO" "正在检查 gcloud alpha 组件..."
-    if gcloud alpha --version >/dev/null 2>&1; then
-        log "SUCCESS" "gcloud alpha 组件已安装。"
-    else
-        log "WARN" "gcloud alpha 组件缺失，正在尝试智能安装..."
-        local install_error
-        local manual_command_gcloud="gcloud components install alpha"
-        local manual_command_apt="sudo apt-get update && sudo apt-get install -y google-cloud-cli-alpha-components"
-
-        # First, try the standard installation method and capture its error output.
-        install_error=$(gcloud components install alpha -q 2>&1)
-        local gcloud_exit_code=$?
-
-        if [ $gcloud_exit_code -eq 0 ]; then
-            log "SUCCESS" "通过 'gcloud components install' 成功安装 alpha 组件！"
-        # [FIX v2.4] Use built-in bash string matching instead of grep for robustness.
-        elif [[ "$install_error" == *"component manager is disabled"* ]]; then
-            log "INFO" "检测到 apt 管理的环境。自动切换到 'sudo apt-get' 方法。"
-            if ! command -v sudo &> /dev/null; then
-                log "ERROR" "sudo 命令不可用，无法自动安装。请手动运行: ${manual_command_apt}"
-                exit 1
-            fi
-            log "INFO" "正在运行 'sudo apt-get update' (这可能需要一些时间)..."
-            sudo apt-get update -q || log "WARN" "运行 'sudo apt-get update' 失败，但这可能不影响继续。"
-            
-            log "INFO" "正在运行 'sudo apt-get install -y google-cloud-cli-alpha-components'..."
-            if ! sudo apt-get install -y -q google-cloud-cli-alpha-components; then
-                log "ERROR" "使用 apt 自动安装 alpha 组件失败。请手动运行: ${manual_command_apt}"
-                exit 1
-            fi
-        else
-            # It was a genuine failure with the standard installer.
-            log "ERROR" "使用 'gcloud components install alpha' 自动安装失败。"
-            log "ERROR" "gcloud 错误信息: ${install_error}"
-            log "ERROR" "请手动运行: ${manual_command_gcloud}"
-            exit 1
-        fi
-        
-        # Final verification after attempting installation
-        if gcloud alpha --version >/dev/null 2>&1; then
-             log "SUCCESS" "gcloud alpha 组件已成功安装并验证！"
-        else
-            log "ERROR" "安装后 alpha 组件仍然不可用。脚本无法继续。"
-            log "ERROR" "请根据您的环境，尝试手动运行上述命令之一来解决问题。"
-            exit 1
-        fi
     fi
 
     log "INFO" "正在检查 GCP 认证和计费状态..."
@@ -165,85 +120,53 @@ write_key_atomic() {
     ) 200>"${TEMP_DIR}/keys.lock"
 }
 
-# ===== EXTREME MODE: 3-Stage Asynchronous Workflow (Functions remain the same) =====
+# ===== NEW v3.0: Simplified Parallel Workflow =====
 
-dispatch_project_creation_tasks() {
-    local projects_to_create=("$@"); local total_tasks=${#projects_to_create[@]}
-    log "INFO" "[Stage 1: Dispatch] 开始异步派发 ${total_tasks} 个项目创建任务..."
-    local operations_log="${TEMP_DIR}/creation_operations.log"; > "$operations_log"
-    for i in "${!projects_to_create[@]}"; do
-        local project_id="${projects_to_create[i]}"
-        gcloud projects create "$project_id" --name="$project_id" --quiet --async --format='value(name)' >> "$operations_log" 2>> "${DETAILED_LOG_FILE}" &
-        if (( (i + 1) % MAX_PARALLEL_JOBS == 0 )); then wait; fi
-    done
-    wait
-    log "SUCCESS" "[Stage 1: Dispatch] 所有 ${total_tasks} 个项目创建任务已派发。"
+# Helper function for the new simplified workflow. Processes one project from start to finish.
+process_single_project() {
+    local project_id="$1"
+    local project_prefix_log="[${project_id}]"
+    local pure_key_file="$2"
+    local comma_key_file="$3"
+    local success_log="$4"
+    local failed_log="$5"
+
+    log "INFO" "${project_prefix_log} 开始创建..."
+    # Step 1: Create the project and wait for it to complete.
+    if ! smart_retry_gcloud gcloud projects create "$project_id" --name="$project_id" --quiet; then
+        log "ERROR" "${project_prefix_log} 项目创建失败。"
+        echo "$project_id" >> "$failed_log"
+        return 1
+    fi
+    log "INFO" "${project_prefix_log} 项目创建成功。"
+
+    # Step 2: Enable the Generative Language API.
+    if ! smart_retry_gcloud gcloud services enable generativelanguage.googleapis.com --project="$project_id" --quiet; then
+        log "ERROR" "${project_prefix_log} 启用API失败，正在删除项目。"
+        smart_retry_gcloud gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 || true
+        echo "$project_id" >> "$failed_log"
+        return 1
+    fi
+    log "INFO" "${project_prefix_log} API启用成功。"
+
+    # Step 3: Create the API Key using the stable command.
+    log "INFO" "${project_prefix_log} 正在创建API密钥..."
+    local api_key
+    api_key=$(gcloud services api-keys create --project="$project_id" --display-name="Gemini-Key-Auto" --format="value(keyString)" 2>> "${DETAILED_LOG_FILE}")
+
+    if [ -n "$api_key" ]; then
+        write_key_atomic "$api_key" "$pure_key_file" "$comma_key_file"
+        log "SUCCESS" "${project_prefix_log} 成功创建并保存API密钥！"
+        echo "$project_id" >> "$success_log"
+    else
+        log "ERROR" "${project_prefix_log} API密钥创建失败，正在删除项目。"
+        smart_retry_gcloud gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 || true
+        echo "$project_id" >> "$failed_log"
+        return 1
+    fi
 }
 
-wait_for_creation_operations() {
-    local operations_log="$1"; local successfully_created_log="$2"
-    mapfile -t operations < "$operations_log"
-    if [ ${#operations[@]} -eq 0 ]; then log "WARN" "[Stage 2: Verify] 没有找到等待的创建操作。"; return; fi
-    log "INFO" "[Stage 2: Verify] 并行等待 ${#operations[@]} 个项目创建操作完成..."
-    local job_count=0
-    for op in "${operations[@]}"; do
-        {
-            if gcloud alpha services operations wait "$op" --timeout=600 >/dev/null 2>&1; then
-                project_id=$(gcloud alpha services operations describe "$op" --format='value(metadata.resourceNames)' 2>/dev/null | sed 's/projects\///')
-                if [ -n "$project_id" ]; then
-                    log "SUCCESS" "[Stage 2: Verify] 项目 [${project_id}] 创建成功。"
-                    echo "$project_id" >> "$successfully_created_log"
-                fi
-            else
-                log "ERROR" "[Stage 2: Verify] 操作 '${op}' 失败或超时。"
-                echo "$op" >> "${TEMP_DIR}/failed_operations.log"
-            fi
-        } &
-        job_count=$((job_count + 1))
-        if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then wait -n || true; job_count=$((job_count - 1)); fi
-    done
-    wait
-    log "SUCCESS" "[Stage 2: Verify] 所有项目创建操作检查完毕。"
-}
-
-process_successful_projects() {
-    local projects_file="$1"; local pure_key_file="$2"; local comma_key_file="$3"
-    mapfile -t projects_to_process < "$projects_file"
-    local total_tasks=${#projects_to_process[@]}
-    if [ "$total_tasks" -eq 0 ]; then log "WARN" "[Stage 3: Process] 没有成功创建的项目可供处理。"; return; fi
-    log "INFO" "[Stage 3: Process] 为 ${total_tasks} 个项目启用API并创建密钥..."
-    >"${TEMP_DIR}/success.log"; >"${TEMP_DIR}/failed.log"
-    local job_count=0
-    for i in "${!projects_to_process[@]}"; do
-        local project_id="${projects_to_process[i]}"
-        {
-            local log_prefix="[${i+1}/${total_tasks}] [${project_id}]"
-            if ! smart_retry_gcloud gcloud services enable generativelanguage.googleapis.com --project="$project_id" --quiet >/dev/null 2>&1; then
-                log "ERROR" "${log_prefix} 启用API失败。"
-                echo "$project_id" >> "${TEMP_DIR}/failed.log"
-            else
-                log "INFO" "${log_prefix} API启用成功，正在创建密钥..."
-                api_key=$(gcloud alpha services api-keys create --project="$project_id" --display-name="Gemini-Key-Auto" --format="value(keyString)" 2>> "${DETAILED_LOG_FILE}")
-                if [ -n "$api_key" ]; then
-                    write_key_atomic "$api_key" "$pure_key_file" "$comma_key_file"
-                    log "SUCCESS" "${log_prefix} 成功获取密钥！"
-                    echo "$project_id" >> "${TEMP_DIR}/success.log"
-                else
-                    log "WARN" "${log_prefix} 获取密钥失败。将尝试删除项目。"
-                    smart_retry_gcloud gcloud projects delete "$project_id" --quiet >/dev/null 2>&1 || true
-                    echo "$project_id" >> "${TEMP_DIR}/failed.log"
-                fi
-            fi
-        } &
-        job_count=$((job_count + 1))
-        if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then wait -n || true; job_count=$((job_count - 1)); fi
-    done
-    wait
-    log "INFO" "[Stage 3: Process] 所有项目处理完毕。"
-}
-
-# ===== Orchestration and Menu Functions (remain the same) =====
-
+# [REBUILT v3.0] Main function for batch creation using the new simplified workflow.
 gemini_batch_create_keys() {
     log "INFO" "====== 高性能批量创建 Gemini API 密钥 ======"
     read -r -p "请输入要创建的项目数量 (例如: 50): " num_projects
@@ -255,15 +178,78 @@ gemini_batch_create_keys() {
     echo -e "  并行任务数:     ${BOLD}${MAX_PARALLEL_JOBS}${NC}" >&2
     echo -e "${RED}警告: 大规模创建项目可能违反GCP服务条款或超出配额。${NC}" >&2
     if ! ask_yes_no "确认要继续吗?"; then log "INFO" "操作已取消。"; return; fi
-    local projects_to_create=()
-    for ((i=1; i<=num_projects; i++)); do projects_to_create+=("$(new_project_id "$project_prefix")"); done
-    local successfully_created_log="${TEMP_DIR}/creation_success.log"; > "$successfully_created_log"
-    dispatch_project_creation_tasks "${projects_to_create[@]}"
-    wait_for_creation_operations "${TEMP_DIR}/creation_operations.log" "$successfully_created_log"
-    local pure_key_file="${OUTPUT_DIR}/all_keys.txt"; local comma_key_file="${OUTPUT_DIR}/all_keys_comma_separated.txt"
-    > "$pure_key_file"; > "$comma_key_file"
-    process_successful_projects "$successfully_created_log" "$pure_key_file" "$comma_key_file"
+
+    # Export functions and variables needed by the background processes
+    export -f log smart_retry_gcloud write_key_atomic
+    export RED GREEN YELLOW PURPLE CYAN NC BOLD DETAILED_LOG_FILE TEMP_DIR
+
+    local pure_key_file="${OUTPUT_DIR}/all_keys.txt"
+    local comma_key_file="${OUTPUT_DIR}/all_keys_comma_separated.txt"
+    local success_log="${TEMP_DIR}/success.log"
+    local failed_log="${TEMP_DIR}/failed.log"
+    > "$pure_key_file"; > "$comma_key_file"; > "$success_log"; > "$failed_log"
+
+    log "INFO" "开始并行创建 ${num_projects} 个项目..."
+    local job_count=0
+    for ((i=1; i<=num_projects; i++)); do
+        local project_id
+        project_id=$(new_project_id "$project_prefix")
+        
+        # Run the entire process for one project in the background
+        process_single_project "$project_id" "$pure_key_file" "$comma_key_file" "$success_log" "$failed_log" &
+
+        job_count=$((job_count + 1))
+        if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then
+            wait -n || true # Wait for any job to finish
+            job_count=$((job_count - 1))
+        fi
+    done
+
+    # Wait for all remaining background jobs to complete
+    wait
+    log "INFO" "所有创建任务已完成。"
     report_and_download_results "$comma_key_file" "$pure_key_file"
+}
+
+# ===== MODIFIED v3.0: Functions for existing projects =====
+
+# This function is now only used by gemini_extract_from_existing
+process_existing_projects() {
+    local projects_file="$1"; local pure_key_file="$2"; local comma_key_file="$3"
+    mapfile -t projects_to_process < "$projects_file"
+    local total_tasks=${#projects_to_process[@]}
+    if [ "$total_tasks" -eq 0 ]; then log "WARN" "[Process] 没有选择任何项目。"; return; fi
+    log "INFO" "[Process] 为 ${total_tasks} 个现有项目启用API并创建密钥..."
+    local success_log="${TEMP_DIR}/success.log"; local failed_log="${TEMP_DIR}/failed.log"
+    >"$success_log"; >"$failed_log"
+    
+    local job_count=0
+    for i in "${!projects_to_process[@]}"; do
+        local project_id="${projects_to_process[i]}"
+        {
+            local log_prefix="[${i+1}/${total_tasks}] [${project_id}]"
+            if ! smart_retry_gcloud gcloud services enable generativelanguage.googleapis.com --project="$project_id" --quiet >/dev/null 2>&1; then
+                log "ERROR" "${log_prefix} 启用API失败。"
+                echo "$project_id" >> "$failed_log"
+            else
+                log "INFO" "${log_prefix} API启用成功，正在创建密钥..."
+                # [REPLACEMENT] Use stable command
+                api_key=$(gcloud services api-keys create --project="$project_id" --display-name="Gemini-Key-Auto" --format="value(keyString)" 2>> "${DETAILED_LOG_FILE}")
+                if [ -n "$api_key" ]; then
+                    write_key_atomic "$api_key" "$pure_key_file" "$comma_key_file"
+                    log "SUCCESS" "${log_prefix} 成功获取密钥！"
+                    echo "$project_id" >> "$success_log"
+                else
+                    log "WARN" "${log_prefix} 获取密钥失败。"
+                    echo "$project_id" >> "$failed_log"
+                fi
+            fi
+        } &
+        job_count=$((job_count + 1))
+        if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then wait -n || true; job_count=$((job_count - 1)); fi
+    done
+    wait
+    log "INFO" "[Process] 所有项目处理完毕。"
 }
 
 gemini_extract_from_existing() {
@@ -292,9 +278,11 @@ gemini_extract_from_existing() {
     local projects_file="${TEMP_DIR}/existing_projects_to_process.txt"; printf "%s\n" "${projects_to_process[@]}" > "$projects_file"
     local pure_key_file="${OUTPUT_DIR}/all_keys.txt"; local comma_key_file="${OUTPUT_DIR}/all_keys_comma_separated.txt"
     > "$pure_key_file"; > "$comma_key_file"
-    process_successful_projects "$projects_file" "$pure_key_file" "$comma_key_file"
+    process_existing_projects "$projects_file" "$pure_key_file" "$comma_key_file"
     report_and_download_results "$comma_key_file" "$pure_key_file"
 }
+
+# ===== Other functions remain largely the same =====
 
 gemini_batch_delete_projects() {
     log "INFO" "====== 批量删除项目 ======"
@@ -365,7 +353,7 @@ EOF
     echo -e "  并行任务: ${CYAN}${MAX_PARALLEL_JOBS}${NC}" >&2
     echo -e "-----------------------------------------------------" >&2
     echo -e "\n${RED}${BOLD}请注意：滥用此脚本可能导致您的GCP账户受限。${NC}\n" >&2
-    echo "  1. 批量创建新项目并提取密钥 (极限模式)" >&2
+    echo "  1. 批量创建新项目并提取密钥 (稳定模式)" >&2
     echo "  2. 从现有项目中提取 API 密钥" >&2
     echo "  3. 批量删除指定前缀的项目" >&2
     echo "  0. 退出脚本" >&2; echo "" >&2
