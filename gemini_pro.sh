@@ -1,20 +1,21 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
-# High-Performance Gemini API Key Batch Management Tool v2.1 (Cloud Shell Fix)
+# High-Performance Gemini API Key Batch Management Tool v2.2 (Robust Setup)
 # Author: ddddd (https://github.com/dddddd1)
 #
-# Changelog v2.1:
-# - Rewrote setup function to be self-healing.
-# - Auto-detects APT-managed environments (like Cloud Shell) and uses `sudo apt-get`
-#   to install alpha components, instead of the disabled `gcloud components install`.
-# - This removes the need for any manual installation steps.
+# Changelog v2.2:
+# - Rewrote setup function to be self-healing and more user-friendly.
+# - Instead of failing on component installation errors, it now provides
+#   clear, copy-pasteable instructions for the user to manually fix their
+#   environment and then re-run the script.
+# - Centralized failure logic for cleaner code.
 #
 # WARNING: Aggressive use of this script may lead to GCP account restrictions.
 # ------------------------------------------------------------------------------
 
 # ===== Global Configuration =====
-VERSION="2.1-CloudShell-Fix"
-: "${MAX_PARALLEL_JOBS:=30}" 
+VERSION="2.2-Robust-Setup"
+: "${MAX_PARALLEL_JOBS:=30}"
 TEMP_DIR=$(mktemp -d)
 OUTPUT_DIR="${PWD}/gemini_keys_$(date +%Y%m%d_%H%M%S)"
 DETAILED_LOG_FILE="${OUTPUT_DIR}/detailed_run.log"
@@ -40,7 +41,9 @@ log() {
         WARN) color="${YELLOW}" ;;
         ERROR) color="${RED}" ;;
     esac
-    echo -e "$(date '+%Y-%m-%d %H:%M:%S') [${type}] ${message}" | tee -a "${DETAILED_LOG_FILE}"
+    # Log to file without color codes
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [${type}] ${message}" >> "${DETAILED_LOG_FILE}"
+    # Log to stderr with color codes
     echo -e "${color}$(date '+%Y-%m-%d %H:%M:%S') [${type}] ${message}${NC}" >&2
 }
 
@@ -74,35 +77,51 @@ setup_environment() {
         log "SUCCESS" "gcloud alpha 组件已安装。"
     else
         log "WARN" "gcloud alpha 组件缺失，正在尝试智能安装..."
+        local install_failed=0
+        local manual_command=""
+
         # Check if component manager is disabled (the Cloud Shell case)
         if gcloud components list --quiet 2>&1 | grep -q "component manager is disabled"; then
             log "INFO" "检测到 apt 管理的环境 (如 Cloud Shell)。将使用 'sudo apt-get' 安装。"
+            manual_command="sudo apt-get update && sudo apt-get install -y google-cloud-cli-alpha-components"
+            
             if ! command -v sudo &> /dev/null; then
-                log "ERROR" "sudo 命令不可用，无法自动安装 alpha 组件。请手动安装后重试。"
-                exit 1
-            fi
-            log "INFO" "正在运行 'sudo apt-get update'..."
-            if ! sudo apt-get update -q; then
-                log "WARN" "运行 'sudo apt-get update' 失败，但这可能不影响继续。"
-            fi
-            log "INFO" "正在运行 'sudo apt-get install -y google-cloud-cli-alpha-components'..."
-            if ! sudo apt-get install -y -q google-cloud-cli-alpha-components; then
-                log "ERROR" "使用 apt 安装 alpha 组件失败。请检查您的系统配置。"
-                log "ERROR" "您可以尝试手动运行: sudo apt-get update && sudo apt-get install -y google-cloud-cli-alpha-components"
-                exit 1
+                log "ERROR" "sudo 命令不可用，无法自动安装 alpha 组件。"
+                install_failed=1
+            else
+                log "INFO" "正在运行 'sudo apt-get update' (这可能需要一些时间)..."
+                sudo apt-get update -q || log "WARN" "运行 'sudo apt-get update' 失败，但这可能不影响继续。"
+                
+                log "INFO" "正在运行 'sudo apt-get install -y google-cloud-cli-alpha-components'..."
+                if ! sudo apt-get install -y -q google-cloud-cli-alpha-components; then
+                    log "ERROR" "使用 apt 自动安装 alpha 组件失败。"
+                    install_failed=1
+                fi
             fi
         else
             log "INFO" "检测到标准 gcloud 环境。将使用 'gcloud components install'。"
+            manual_command="gcloud components install alpha"
             if ! gcloud components install alpha -q; then
-               log "ERROR" "自动安装 alpha 组件失败。请手动运行 'gcloud components install alpha'."
-               exit 1
+               log "ERROR" "自动安装 alpha 组件失败。"
+               install_failed=1
             fi
         fi
         
-        if gcloud alpha --version >/dev/null 2>&1; then
+        # Centralized check for success or failure
+        if [ "$install_failed" -eq 1 ]; then
+            echo -e "\n${RED}${BOLD}========================= 操作需要您介入 =========================${NC}" >&2
+            echo -e "${YELLOW}脚本无法自动安装所需的 gcloud alpha 组件。${NC}" >&2
+            echo -e "这通常是由于权限问题或网络环境造成的。" >&2
+            echo -e "\n${BOLD}请您手动在终端中运行以下命令：${NC}" >&2
+            echo -e "\n    ${CYAN}${manual_command}${NC}\n" >&2
+            echo -e "${BOLD}成功运行该命令后，请重新启动此脚本。${NC}" >&2
+            echo -e "${RED}${BOLD}===================================================================${NC}\n" >&2
+            exit 1
+        elif gcloud alpha --version >/dev/null 2>&1; then
              log "SUCCESS" "gcloud alpha 组件已成功安装！"
         else
             log "ERROR" "安装后 alpha 组件仍然不可用。脚本无法继续。"
+            log "ERROR" "请尝试手动运行 '${manual_command}' 并重新启动脚本。"
             exit 1
         fi
     fi
