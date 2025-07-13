@@ -1,19 +1,19 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
-# High-Performance Gemini API Key Batch Management Tool v2.3 (Reactive Setup)
+# High-Performance Gemini API Key Batch Management Tool v2.4 (Final Setup Fix)
 # Author: ddddd (https://github.com/dddddd1)
 #
-# Changelog v2.3:
-# - Fixed a critical bug where apt-managed environments were misidentified.
-# - The setup function now attempts a standard install first, then reacts to the
-#   specific "component manager is disabled" error by automatically switching
-#   to the 'sudo apt-get' method. This makes the detection foolproof.
+# Changelog v2.4:
+# - Replaced the 'grep' check in the setup function with a more robust,
+#   built-in bash string comparison ('[[ "$var" == *substring* ]]').
+# - This definitively fixes the bug where apt-managed environments were
+#   correctly detected but improperly handled, leading to incorrect error messages.
 #
 # WARNING: Aggressive use of this script may lead to GCP account restrictions.
 # ------------------------------------------------------------------------------
 
 # ===== Global Configuration =====
-VERSION="2.3-Reactive-Setup"
+VERSION="2.4-Final-Setup-Fix"
 : "${MAX_PARALLEL_JOBS:=30}"
 TEMP_DIR=$(mktemp -d)
 OUTPUT_DIR="${PWD}/gemini_keys_$(date +%Y%m%d_%H%M%S)"
@@ -59,7 +59,7 @@ ask_yes_no() {
 
 # ===== Core Utility and Setup Functions =====
 
-# [REBUILT v2.3] Reactive setup function that handles gcloud installation types
+# [REBUILT v2.4] Final setup function with robust bash-native error checking
 setup_environment() {
     mkdir -p "$OUTPUT_DIR"
     log "INFO" "临时目录: ${TEMP_DIR}"
@@ -86,8 +86,8 @@ setup_environment() {
 
         if [ $gcloud_exit_code -eq 0 ]; then
             log "SUCCESS" "通过 'gcloud components install' 成功安装 alpha 组件！"
-        # Check if the error message indicates a disabled component manager.
-        elif echo "$install_error" | grep -q "component manager is disabled"; then
+        # [FIX v2.4] Use built-in bash string matching instead of grep for robustness.
+        elif [[ "$install_error" == *"component manager is disabled"* ]]; then
             log "INFO" "检测到 apt 管理的环境。自动切换到 'sudo apt-get' 方法。"
             if ! command -v sudo &> /dev/null; then
                 log "ERROR" "sudo 命令不可用，无法自动安装。请手动运行: ${manual_command_apt}"
