@@ -1,197 +1,3 @@
-#!/bin/bash
-
-# ==============================================================================
-#
-# 高性能 Gemini API 密钥批量管理工具
-#
-# 功能:
-#   1. 批量创建 GCP 项目并生成 Gemini API 密钥。
-#   2. 从现有 GCP 项目中提取 Gemini API 密钥。
-#   3. 按前缀批量删除 GCP 项目。
-#
-# 使用说明:
-#   - 确保已安装并登录 gcloud CLI。
-#   - 确保当前账户有权限创建项目并已关联结算账户。
-#   - 直接运行脚本: ./gemini_key_manager.sh
-#
-# ==============================================================================
-
-# --- 配置 ---
-VERSION="2.0-Optimized"
-# 【优化】调高默认并行任务数以极致加速。
-# 注意：过高的值会因超出GCP配额而导致大量失败。请根据您的账户配额酌情调整。50是一个非常激进的数值。
-MAX_PARALLEL_JOBS=${MAX_PARALLEL_JOBS:-50}
-
-# --- 全局变量 ---
-TEMP_DIR=$(mktemp -d)
-OUTPUT_DIR="${PWD}/gemini_keys_$(date +%Y%m%d_%H%M%S)"
-DETAILED_LOG_FILE="${TEMP_DIR}/detailed_run.log"
-
-# --- 颜色定义 ---
-NC='\033[0m'
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-
-# ===== 核心函数 =====
-
-# 日志记录函数，带时间戳和锁机制
-log() {
-    local type="$1"
-    local message="$2"
-    local color="$NC"
-    case "$type" in
-        INFO) color="$CYAN";;
-        SUCCESS) color="$GREEN";;
-        WARN) color="$YELLOW";;
-        ERROR) color="$RED";;
-    esac
-    (
-        flock 200
-        echo -e "${color}[$(date +'%Y-%m-%d %H:%M:%S')] [$type]${NC} $message" | tee -a "$DETAILED_LOG_FILE" >&2
-    ) 200>"${TEMP_DIR}/log.lock"
-}
-
-# 带有重试逻辑的 gcloud 命令执行器
-smart_retry_gcloud() {
-    local cmd=("$@")
-    local tries=${TRIES:-5}
-    local delay=${DELAY:-5}
-    local attempt=1
-    while [ "$attempt" -le "$tries" ]; do
-        if "${cmd[@]}"; then
-            return 0
-        fi
-        log "WARN" "命令执行失败: '${cmd[*]}'. ${attempt}/${tries} 次尝试后将在 ${delay}s 后重试..."
-        sleep "$delay"
-        attempt=$((attempt + 1))
-    done
-    return 1
-}
-
-# 检查GCP环境是否就绪
-check_gcp_env() {
-    log "INFO" "正在检查 GCP 环境配置..."
-    if ! command -v gcloud &> /dev/null; then
-        log "ERROR" "gcloud CLI 未找到。请访问 https://cloud.google.com/sdk/docs/install 安装。"
-        exit 1
-    fi
-    local current_user
-    current_user=$(gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null)
-    if [ -z "$current_user" ]; then
-        log "ERROR" "未登录 GCP 账户。请运行 'gcloud auth login' 并 'gcloud auth application-default login'。"
-        exit 1
-    fi
-    log "INFO" "账户 [${current_user}] 已登录。"
-    
-    local billing_accounts
-    billing_accounts=$(gcloud beta billing accounts list --format='value(ACCOUNT_ID)' --filter='OPEN=true' 2>/dev/null)
-    if [ -z "$billing_accounts" ]; then
-        log "ERROR" "未找到有效的结算账户。创建项目需要一个有效的结算账户。"
-        exit 1
-    fi
-    
-    local linked_billing
-    linked_billing=$(gcloud beta billing projects list --billing-account="$(echo "$billing_accounts" | head -n1)" --format="value(projectId)" --filter="projectId:$(gcloud config get-value project)" 2>/dev/null)
-    if [ -z "$linked_billing" ]; then
-        log "WARN" "当前项目未链接结算账户，将尝试自动链接。这可能需要更高权限。"
-    fi
-    log "SUCCESS" "GCP 环境检查通过。"
-}
-
-# 生成唯一的项目ID
-new_project_id() {
-    local prefix="$1"
-    echo "${prefix}-$(date +%s)-${RANDOM}"
-}
-
-# 确认提示
-ask_yes_no() {
-    local question="$1"
-    while true; do
-        read -r -p "$question [y/N]: " answer
-        case "$answer" in
-            [Yy]* ) return 0;;
-            [Nn]*|"" ) return 1;;
-            * ) echo "请输入 y 或 n.";;
-        esac
-    done
-}
-
-# 原子化地写入密钥文件
-write_key_atomic() {
-    local key="$1"
-    local pure_file="$2"
-    local comma_file="$3"
-    local temp_pure
-    local temp_comma
-    temp_pure=$(mktemp)
-    temp_comma=$(mktemp)
-    
-    # 追加到临时文件
-    echo "$key" >> "$temp_pure"
-    
-    # 创建新的逗号分隔内容
-    if [ -s "$comma_file" ]; then
-        echo "$(cat "$comma_file"),$key" > "$temp_comma"
-    else
-        echo "$key" > "$temp_comma"
-    fi
-    
-    # 原子性地移动/追加
-    (
-        flock 300
-        cat "$temp_pure" >> "$pure_file"
-        mv "$temp_comma" "$comma_file"
-    ) 300>"${pure_file}.lock"
-    
-    rm "$temp_pure"
-}
-
-# 启用API并创建密钥的核心逻辑
-enable_api_and_create_key() {
-    local project_id="$1"
-    local log_prefix="$2"
-
-    log "INFO" "${log_prefix} 正在启用 generativelanguage.googleapis.com API..."
-    if ! smart_retry_gcloud gcloud services enable generativelanguage.googleapis.com --project="$project_id" --quiet >/dev/null 2>&1; then
-        log "ERROR" "${log_prefix} 启用 generativelanguage.googleapis.com API 失败。"
-        return 1
-    fi
-    log "INFO" "${log_prefix} API 启用成功。"
-    
-    # 【优化】移除固定的 sleep 5。后续的 smart_retry_gcloud 会在首次失败后（例如因API传播延迟）进行带延迟的重试，这更高效。
-    log "INFO" "${log_prefix} 正在创建 API 密钥..."
-    
-    local api_key
-    api_key=$(smart_retry_gcloud gcloud alpha services api-keys create \
-        --project="$project_id" \
-        --display-name="Gemini API Key" \
-        --api-target="service=generativelanguage.googleapis.com" \
-        --format="value(keyString)" 2>/dev/null)
-    
-    if [ -z "$api_key" ]; then
-        log "ERROR" "${log_prefix} 多次尝试后，创建或获取 API 密钥仍然失败。"
-        return 1
-    fi
-    
-    echo "$api_key"
-}
-
-# ===== 任务处理器 =====
-
-process_new_project_creation() {
-    local project_id="$1"
-    local task_num="$2"
-    local total_tasks="$3"
-    local pure_key_file="$4"
-    local comma_key_file="$5"
-    local log_prefix="[${task_num}/${total_tasks}] [${project_id}]"
-
-    log "INFO" "${log_prefix} 开始创建项目..."
     if ! smart_retry_gcloud gcloud projects create "$project_id" --name="$project_id" --quiet >&2; then
         log "ERROR" "${log_prefix} 项目创建失败。"
         echo "$project_id" >> "${TEMP_DIR}/failed.log"
@@ -244,6 +50,7 @@ run_parallel_processor() {
     local pure_key_file="${OUTPUT_DIR}/all_keys.txt"
     local comma_key_file="${OUTPUT_DIR}/all_keys_comma_separated.txt"
 
+    # 初始化输出文件，确保每次运行都是干净的
     > "$pure_key_file"
     > "$comma_key_file"
 
@@ -285,8 +92,9 @@ gemini_batch_create_keys() {
     echo -e "\n${YELLOW}${BOLD}=== 操作确认 ===${NC}" >&2
     echo -e "  计划创建项目数: ${BOLD}${num_projects}${NC}" >&2
     echo -e "  项目前缀:       ${BOLD}${project_prefix}${NC}" >&2
-    echo -e "  并行任务数:     ${BOLD}${MAX_PARALLEL_JOBS}${NC} ${RED}(警告: 高并行可能导致配额问题)${NC}" >&2
+    echo -e "  并行任务数:     ${BOLD}${MAX_PARALLEL_JOBS}${NC}" >&2
     echo -e "  输出目录:       ${BOLD}${OUTPUT_DIR}${NC}" >&2
+    echo -e "${RED}警告: 大规模创建项目可能违反GCP服务条款或超出配额。${NC}" >&2
     if ! ask_yes_no "确认要继续吗?"; then
         log "INFO" "操作已取消。"
         return
@@ -386,17 +194,16 @@ gemini_batch_delete_projects() {
 
     rm -f "${TEMP_DIR}/delete_success.log" "${TEMP_DIR}/delete_failed.log"
     touch "${TEMP_DIR}/delete_success.log" "${TEMP_DIR}/delete_failed.log"
-    log "INFO" "开始批量提交删除任务..."
+    log "INFO" "开始批量删除任务..."
     
     local job_count=0
     for project_id in "${projects_to_delete[@]}"; do
         {
-            # 【优化】添加 --async 标志以“即发即忘”模式加速删除，脚本不会等待每个项目删除完成。
-            if gcloud projects delete "$project_id" --quiet --async >/dev/null 2>&1; then
-                log "SUCCESS" "项目 [${project_id}] 删除请求已成功提交。"
+            if smart_retry_gcloud gcloud projects delete "$project_id" --quiet; then
+                log "SUCCESS" "项目 [${project_id}] 删除成功。"
                 echo "$project_id" >> "${TEMP_DIR}/delete_success.log"
             else
-                log "ERROR" "项目 [${project_id}] 删除请求提交失败。"
+                log "ERROR" "项目 [${project_id}] 删除失败。"
                 echo "$project_id" >> "${TEMP_DIR}/delete_failed.log"
             fi
         } &
@@ -411,12 +218,10 @@ gemini_batch_delete_projects() {
     local success_count=$(wc -l < "${TEMP_DIR}/delete_success.log" | tr -d ' ')
     local failed_count=$(wc -l < "${TEMP_DIR}/delete_failed.log" | tr -d ' ')
 
-    echo -e "\n${GREEN}${BOLD}====== 批量删除请求提交完成 ======${NC}" >&2
-    log "SUCCESS" "成功提交删除请求: ${success_count}"
-    log "ERROR" "提交删除请求失败: ${failed_count}"
+    echo -e "\n${GREEN}${BOLD}====== 批量删除完成 ======${NC}" >&2
+    log "SUCCESS" "成功删除: ${success_count}"
+    log "ERROR" "删除失败: ${failed_count}"
 }
-
-# ===== 报告与清理 =====
 
 report_and_download_results() {
     local comma_key_file="$1"
@@ -455,14 +260,6 @@ report_and_download_results() {
     fi
 }
 
-setup_environment() {
-    trap 'rm -rf "$TEMP_DIR"; exit' INT TERM EXIT
-    mkdir -p "$TEMP_DIR"
-    touch "${TEMP_DIR}/log.lock"
-}
-
-# ===== 主菜单与应用入口 =====
-
 show_main_menu() {
     clear
     echo -e "${PURPLE}${BOLD}" >&2
@@ -490,6 +287,8 @@ EOF
 }
 
 main_app() {
+    mkdir -p "$OUTPUT_DIR"
+    touch "${TEMP_DIR}/log.lock"
     check_gcp_env
 
     while true;
