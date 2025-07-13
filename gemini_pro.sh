@@ -1,58 +1,58 @@
 #!/bin/bash
 
 #================================================================================
-选择
+# 高性能 Gemini API 密钥批量管理工具 v2.0 (Optimized)
 #
-案例
-本地成功_计数本地失败_计数
+# 作者: ddddd (原始脚本)
+# 优化: AI Assistant (基于性能分析)
 #
-$(wc -l <
-${TEMP_DIR}
-| tr -d
-' '
-$(wc -l <
-${TEMP_DIR}
+# 优化说明:
+# 1. **批量API启用**: 最大的性能提升。将N次`gcloud services enable`调用合并为1次。
+# 2. **异步项目创建**: 并行发起所有项目创建请求，然后统一等待，充分利用GCP后端能力。
+# 3. **高效密钥提取**: 将API密钥的创建和字符串获取合并为1个`gcloud`命令。
+# 4. **并行化分阶段**: 将重量级操作（创建、启用）与轻量级操作（提key）分离，
+#    使得每个阶段都能最高效地运行。
 #================================================================================
 
-| tr -d
-' '="2.0-Optimized"
-MAX_PARALLEL_JOBSecho -e${绿色}
-OUTPUT_DIR=${粗体}
-TEMP_DIR====== 操作完成：统计结果 ======
-DETAILED_LOG_FILE=${NC}
+# --- 配置 ---
+VERSION="2.0-Optimized"
+MAX_PARALLEL_JOBS=${MAX_PARALLEL_JOBS:-50} # 并行任务数，可根据机器性能和配额调整
+OUTPUT_DIR="${HOME}/gemini_keys"
+TEMP_DIR=$(mktemp -d)
+DETAILED_LOG_FILE="${OUTPUT_DIR}/run_$(date +%Y%m%d_%H%M%S).log"
 
-日志
-"成功:
-${success_count}='\033[0;31m'
-日志='\033[0;32m'
-"失败:='\033[0;33m'
-${failed_count}='\033[0;35m'
-如果='\033[0;36m'
-$success_count='\033[1m'
+# --- 颜色定义 ---
+NC='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 
--gt 0]；然后
+# ===== 工具函数 =====
 
-echo -e
-${紫}
-echo -e“最终 API like you（you）”="echo -e"
-${NC}echo -e="${绿色}"
-${粗体}猫="$逗号_key_file"
-echo >&2"echo -e" ${NC}
-        INFO) echo -e="${紫}" ;;
-        SUCCESS) ${NC}="日志" ;;
-        WARN) "以上密钥已完整保存至目录:="${粗体}" ;;
-        ERROR) ${OUTPUT_DIR}="${NC}日志
-逗号分隔密钥文件:
-    "${粗体}
-${逗号_key_file}"${NC}/log.lock"日志为""做每行一个密钥文件:)${粗体}${pure_key_file}${NC}如果${DEVSHELL_PROJECT_ID-}-a "" >&2"" "" "
+# 日志记录函数，带时间戳和锁，确保并行写入安全
+log() {
+    local type="$1"
+    local message="$2"
+    local color="$NC"
+    case "$type" in
+        INFO) color="$CYAN" ;;
+        SUCCESS) color="$GREEN" ;;
+        WARN) color="$YELLOW" ;;
+        ERROR) color="$RED" ;;
+    esac
+    # flock确保对日志文件的写入是原子的，防止并行时日志交错
+    flock "${TEMP_DIR}/log.lock" printf "%s [%s] %-7s %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$type" "$message" | tee -a "$DETAILED_LOG_FILE" >&2
 }
 
-日志
-“检测到云壳，你看我……”
-下载-rf "$逗"
-日志"="" "
+# 退出时清理临时文件
+cleanup() {
+    rm -rf "$TEMP_DIR"
+    log "INFO" "临时文件已清理。"
 }
-${逗号_key_file##*/}
+trap cleanup EXIT
 
 # 设置环境
 setup_environment() {
@@ -415,35 +415,35 @@ gemini_batch_delete_projects() {
     log "INFO" "开始批量删除任务..."
     
     local job_count=0
-    埃罗夫 project_id 回声-e您可以bioto may API${com}${NC}>&2 "回声-e"---------------------">&2"; 回声-e"${Blu}：dddd（you you，you）${NC}">&2
+    for project_id in "${projects_to_delete[@]}"; do
         {
-            回声-e"--------------------">&2当地帐户"帐户=$（gcloud config get-value account 2>/dev/null|echo“you you”）" --quiet; 回声-e[you mayoto:${}${NC}]>&2
-回声-E[mayoto mayoto:${Mao}${MAX_PARALLEL_JOBS}${NC}]>&2"SUCCESS" 回声-e"---------------------">&2回声-e"\N${mayoto{######****************************************${NC}\N">&2回声[1.[you you you.]]>&2
-回声。你你你喜欢]>&2"echo“3.批量删除指定前缀的项目”" >> "echo“0.退出脚本”/delete_success.log"
-            “echo”>和2
-main_app() {"ERROR" 虽然是真的；做阅读-r-p“请选择操作[0-3]：”choice
-案例“$choice”"1) gemini_batch_create_keys_optimized ;;" >> "2) gemini_extract_from_existing ;;/delete_failed.log"
-            3) gemini_batch_delete_projects ;;
-0）出口0；；
-        job_count*）日志“ERROR”“无效输入，无效输入，0、1、2、3”；
-        esac [ "echo-E"\N${GREEN}按任意键返回主菜单……${NC}">&2" -ge "日志警告" 0）出口0；；
-${DETAILED_LOG_FILE}
-            job_count=日志警告
-" "
-失败的项目 ID
+            if smart_retry_gcloud gcloud projects delete "$project_id" --quiet; then
+                log "SUCCESS" "项目 [${project_id}] 删除成功。"
+                echo "$project_id" >> "${TEMP_DIR}/delete_success.log"
+            else
+                log "ERROR" "项目 [${project_id}] 删除失败。"
+                echo "$project_id" >> "${TEMP_DIR}/delete_failed.log"
+            fi
+        } &
+        job_count=$((job_count + 1))
+        if [ "$job_count" -ge "$MAX_PARALLEL_JOBS" ]; then
+            wait -n || true
+            job_count=$((job_count - 1))
+        fi
+    done
     
-${TEMP_DIR}
-show_main_menu() {清晰的/delete_success.log失败的项目身份证在你吗：埃罗夫3. 批量删除指定前缀的项目0. 退出脚本
-" 信息 job_count*）you will you“ERROR”[you mayoto you，0、1、2、3]；${NC}/delete_failed.log====== 批量删除完成 ======${NC}
+    wait
+    local success_count=$(wc -l < "${TEMP_DIR}/delete_success.log" | tr -d ' ')
+    local failed_count=$(wc -l < "${TEMP_DIR}/delete_failed.log" | tr -d ' ')
 
-出口[回声*）日志
-回声"
-"main_app() {而真正的
+    echo -e "\n${GREEN}${BOLD}====== 批量删除完成 ======${NC}" >&2
+    log "SUCCESS" "成功删除: ${success_count}"
+    log "ERROR" "删除失败: ${failed_count}"
 }
 
-做
-阅读""
-[请选择操作[0-3]：]
+report_and_download_results() {
+    local comma_key_file="$1"
+    local pure_key_file="$2"
     local success_count
     local failed_count
     success_count=$(wc -l < "${TEMP_DIR}/success.log" | tr -d ' ')
@@ -461,69 +461,69 @@ show_main_menu() {清晰的/delete_success.log失败的项目身份证在你吗�
         cat "$comma_key_file" >&2
         echo >&2
         echo -e "${NC}" >&2
-返回"菲======================================================#--第四阶段：并行创建和提取密钥--\n" >&2
+        echo -e "${PURPLE}======================================================${NC}\n" >&2
 
-日志"INFO" [第 4/4]${#successful_projects[@]}个项目并行提取 API。${successful_projects[@]}
-# ===== 编排与原有函数 =====""#从现有项目提取密钥的函数（你看，你看，你看钥匙）process_existing_project_extraction() { ""当地的$1当地的"
-$2当地的$3当地的$4"
+        log "INFO" "以上密钥已完整保存至目录: ${BOLD}${OUTPUT_DIR}${NC}"
+        log "INFO" "逗号分隔密钥文件: ${BOLD}${comma_key_file}${NC}"
+        log "INFO" "每行一个密钥文件: ${BOLD}${pure_key_file}${NC}"
         
-当地的$5当地的
-" ""${task_num}" ${total_tasks}
-] [${project_id}"
-日志"SUCCESS" ${log_prefix}开始处理现有项目...""
-"个活跃项目。请选择要处理的项目:"
-"$((i+1))
-为i in{TEMP_DIR}${!all_projects[@]}
-"; do
-printf ""
+        if [ -n "${DEVSHELL_PROJECT_ID-}" ] && command -v cloudshell &>/dev/null; then
+            log "INFO" "检测到 Cloud Shell 环境，将自动触发下载..."
+            cloudshell download "$comma_key_file"
+            log "SUCCESS" "下载提示已发送。文件: ${comma_key_file##*/}"
+        fi
+    fi
+    if [ "$failed_count" -gt 0 ]; {
+        log "WARN" "失败的项目ID列表保存在详细日志中: ${DETAILED_LOG_FILE}"
+        log "WARN" "失败的项目ID也记录在: ${TEMP_DIR}/failed.log"
     }
 }
 
-其他的
-日志
-警告
-" "
-无效的编号:
-$num
+show_main_menu() {
+    clear
+    echo -e "${PURPLE}${BOLD}" >&2
+    cat >&2 << "EOF"
+  ____ ____ ____ ____ ____ ____ _________ ____ ____ ____ 
+ ||G |||e |||m |||i |||n |||i |||       |||K |||e |||y ||
  ||__|||__|||__|||__|||__|||__|||_______|||__|||__|||__||
  |/__\|/__\|/__\|/__\|/__\|/__\|/_______\|/__\|/__\|/__\|
-，已忽略。
-"菲"
-"完成"
-"菲"
-如果
-${#projects_to_process[@]}
-" >&2"
--eq 0]；然后
-" -ge "
-"日志""
-为 I在{TEMP_DIR}
-"" "
-${!all_projects[@]}
-""; do'
-其他的
-为
+EOF
+    echo -e "      高性能 Gemini API 密钥批量管理工具 ${BOLD}v${VERSION}${NC}" >&2
+    echo -e "-----------------------------------------------------" >&2
+    echo -e "${YELLOW}  作者: ddddd (脚本完全免费分享，请勿倒卖)${NC}" >&2
+    echo -e "-----------------------------------------------------" >&2
+    local account
+    account=$(gcloud config get-value account 2>/dev/null || echo "未登录")
+    echo -e "  当前账户: ${CYAN}${account}${NC}" >&2
+    echo -e "  并行任务: ${CYAN}${MAX_PARALLEL_JOBS}${NC}" >&2
+    echo -e "-----------------------------------------------------" >&2
+    echo -e "\n${RED}${BOLD}请注意：滥用此脚本可能导致您的GCP账户受限。${NC}\n" >&2
+    echo "  1. [极速] 批量创建新项目并提取密钥 (推荐)" >&2
+    echo "  2. 从现有项目中提取 API 密钥" >&2
+    echo "  3. 批量删除指定前缀的项目" >&2
+    echo "  0. 退出脚本" >&2
+    echo "" >&2
 }
 
-${selections[@]}
+main_app() {
     check_gcp_env
 
-"做
-如果
+    while true;
+    do
         show_main_menu
-$num
-" =~ ^[0-9]+
-$
-]] && [ "
-$num
-" -ge 1 ] && [ "
-$num
-" -le "
-${#all_projects[@]}
-然后]
-${all_projects[
+        read -r -p "请选择操作 [0-3]: " choice
+        case "$choice" in
+            1) gemini_batch_create_keys_optimized ;;
+            2) gemini_extract_from_existing ;;
+            3) gemini_batch_delete_projects ;;
+            0) exit 0 ;;
+            *) log "ERROR" "无效输入，请输入 0, 1, 2, 或 3。" ;;
+        esac
+        echo -e "\n${GREEN}按任意键返回主菜单...${NC}" >&2
+        read -n 1 -s -r || true
+    done
 }
 
-$（（编号-1））
+# ===== Main Execution =====
 setup_environment
 main_app
