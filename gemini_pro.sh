@@ -1,20 +1,19 @@
 #!/bin/bash
 # ------------------------------------------------------------------------------
-# High-Performance Gemini API Key Batch Management Tool v2.2 (Robust Setup)
+# High-Performance Gemini API Key Batch Management Tool v2.3 (Reactive Setup)
 # Author: ddddd (https://github.com/dddddd1)
 #
-# Changelog v2.2:
-# - Rewrote setup function to be self-healing and more user-friendly.
-# - Instead of failing on component installation errors, it now provides
-#   clear, copy-pasteable instructions for the user to manually fix their
-#   environment and then re-run the script.
-# - Centralized failure logic for cleaner code.
+# Changelog v2.3:
+# - Fixed a critical bug where apt-managed environments were misidentified.
+# - The setup function now attempts a standard install first, then reacts to the
+#   specific "component manager is disabled" error by automatically switching
+#   to the 'sudo apt-get' method. This makes the detection foolproof.
 #
 # WARNING: Aggressive use of this script may lead to GCP account restrictions.
 # ------------------------------------------------------------------------------
 
 # ===== Global Configuration =====
-VERSION="2.2-Robust-Setup"
+VERSION="2.3-Reactive-Setup"
 : "${MAX_PARALLEL_JOBS:=30}"
 TEMP_DIR=$(mktemp -d)
 OUTPUT_DIR="${PWD}/gemini_keys_$(date +%Y%m%d_%H%M%S)"
@@ -60,7 +59,7 @@ ask_yes_no() {
 
 # ===== Core Utility and Setup Functions =====
 
-# [REBUILT] Smart setup function that handles different gcloud installation types
+# [REBUILT v2.3] Reactive setup function that handles gcloud installation types
 setup_environment() {
     mkdir -p "$OUTPUT_DIR"
     log "INFO" "临时目录: ${TEMP_DIR}"
@@ -77,51 +76,45 @@ setup_environment() {
         log "SUCCESS" "gcloud alpha 组件已安装。"
     else
         log "WARN" "gcloud alpha 组件缺失，正在尝试智能安装..."
-        local install_failed=0
-        local manual_command=""
+        local install_error
+        local manual_command_gcloud="gcloud components install alpha"
+        local manual_command_apt="sudo apt-get update && sudo apt-get install -y google-cloud-cli-alpha-components"
 
-        # Check if component manager is disabled (the Cloud Shell case)
-        if gcloud components list --quiet 2>&1 | grep -q "component manager is disabled"; then
-            log "INFO" "检测到 apt 管理的环境 (如 Cloud Shell)。将使用 'sudo apt-get' 安装。"
-            manual_command="sudo apt-get update && sudo apt-get install -y google-cloud-cli-alpha-components"
-            
+        # First, try the standard installation method and capture its error output.
+        install_error=$(gcloud components install alpha -q 2>&1)
+        local gcloud_exit_code=$?
+
+        if [ $gcloud_exit_code -eq 0 ]; then
+            log "SUCCESS" "通过 'gcloud components install' 成功安装 alpha 组件！"
+        # Check if the error message indicates a disabled component manager.
+        elif echo "$install_error" | grep -q "component manager is disabled"; then
+            log "INFO" "检测到 apt 管理的环境。自动切换到 'sudo apt-get' 方法。"
             if ! command -v sudo &> /dev/null; then
-                log "ERROR" "sudo 命令不可用，无法自动安装 alpha 组件。"
-                install_failed=1
-            else
-                log "INFO" "正在运行 'sudo apt-get update' (这可能需要一些时间)..."
-                sudo apt-get update -q || log "WARN" "运行 'sudo apt-get update' 失败，但这可能不影响继续。"
-                
-                log "INFO" "正在运行 'sudo apt-get install -y google-cloud-cli-alpha-components'..."
-                if ! sudo apt-get install -y -q google-cloud-cli-alpha-components; then
-                    log "ERROR" "使用 apt 自动安装 alpha 组件失败。"
-                    install_failed=1
-                fi
+                log "ERROR" "sudo 命令不可用，无法自动安装。请手动运行: ${manual_command_apt}"
+                exit 1
+            fi
+            log "INFO" "正在运行 'sudo apt-get update' (这可能需要一些时间)..."
+            sudo apt-get update -q || log "WARN" "运行 'sudo apt-get update' 失败，但这可能不影响继续。"
+            
+            log "INFO" "正在运行 'sudo apt-get install -y google-cloud-cli-alpha-components'..."
+            if ! sudo apt-get install -y -q google-cloud-cli-alpha-components; then
+                log "ERROR" "使用 apt 自动安装 alpha 组件失败。请手动运行: ${manual_command_apt}"
+                exit 1
             fi
         else
-            log "INFO" "检测到标准 gcloud 环境。将使用 'gcloud components install'。"
-            manual_command="gcloud components install alpha"
-            if ! gcloud components install alpha -q; then
-               log "ERROR" "自动安装 alpha 组件失败。"
-               install_failed=1
-            fi
+            # It was a genuine failure with the standard installer.
+            log "ERROR" "使用 'gcloud components install alpha' 自动安装失败。"
+            log "ERROR" "gcloud 错误信息: ${install_error}"
+            log "ERROR" "请手动运行: ${manual_command_gcloud}"
+            exit 1
         fi
         
-        # Centralized check for success or failure
-        if [ "$install_failed" -eq 1 ]; then
-            echo -e "\n${RED}${BOLD}========================= 操作需要您介入 =========================${NC}" >&2
-            echo -e "${YELLOW}脚本无法自动安装所需的 gcloud alpha 组件。${NC}" >&2
-            echo -e "这通常是由于权限问题或网络环境造成的。" >&2
-            echo -e "\n${BOLD}请您手动在终端中运行以下命令：${NC}" >&2
-            echo -e "\n    ${CYAN}${manual_command}${NC}\n" >&2
-            echo -e "${BOLD}成功运行该命令后，请重新启动此脚本。${NC}" >&2
-            echo -e "${RED}${BOLD}===================================================================${NC}\n" >&2
-            exit 1
-        elif gcloud alpha --version >/dev/null 2>&1; then
-             log "SUCCESS" "gcloud alpha 组件已成功安装！"
+        # Final verification after attempting installation
+        if gcloud alpha --version >/dev/null 2>&1; then
+             log "SUCCESS" "gcloud alpha 组件已成功安装并验证！"
         else
             log "ERROR" "安装后 alpha 组件仍然不可用。脚本无法继续。"
-            log "ERROR" "请尝试手动运行 '${manual_command}' 并重新启动脚本。"
+            log "ERROR" "请根据您的环境，尝试手动运行上述命令之一来解决问题。"
             exit 1
         fi
     fi
