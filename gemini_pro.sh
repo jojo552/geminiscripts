@@ -7,7 +7,7 @@ RANDOM_CHARS=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 4 | head -n 1)
 EMAIL_USERNAME="momo${RANDOM_CHARS}${TIMESTAMP:(-4)}"
 PROJECT_PREFIX="gemini-key"
 ### MODIFICATION ###: Project count is now fixed at 50 as requested.
-TOTAL_PROJECTS=25  # 固定创建50个项目，根据用户要求
+TOTAL_PROJECTS=75  # 固定创建75个项目，根据用户要求
 MAX_PARALLEL_JOBS=40  # 默认设置为40 (可根据机器性能和网络调整)
 GLOBAL_WAIT_SECONDS=75 # 创建项目和启用API之间的全局等待时间 (秒)
 MAX_RETRY_ATTEMPTS=3  # 重试次数
@@ -251,7 +251,7 @@ show_menu() {
   echo "当前账号: $current_account"; echo "当前项目: $current_project"
   echo "固定创建数量: $TOTAL_PROJECTS"; echo "并行任务数: $MAX_PARALLEL_JOBS"; echo "全局等待: ${GLOBAL_WAIT_SECONDS}s"
   echo ""; echo "请选择功能:";
-  echo "1. [极限速度] 一键创建50个项目并获取API密钥"
+  echo "1. [极限速度] 一键创建75个项目并获取API密钥"
   echo "2. 一键删除所有现有项目"
   echo "3. 修改配置参数"
   echo "0. 退出"
